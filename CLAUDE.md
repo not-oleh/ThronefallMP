@@ -10,11 +10,17 @@ Read this file and `STATUS.md` (imported at the bottom) before exploring anythin
 - Never commit anything from `game/`, `decompiled/`, `tools/` (copyrighted or downloaded).
 - Never modify the Steam install; all work happens on the clone in `game/`.
 - Never bypass DLC ownership (`DlcConfiguration.forceCraaghelm` stays untouched).
+- Guard any Craaghelm-specific hooks (`EnergyCoreBalance`, DLC maps) so players without the DLC
+  never hit null references.
 - Launching the game opens windows on the user's screen. Launch only to verify, keep runs
   short, and always `pkill -f "ThronefallMod/game/thronefall.app"` afterwards.
 - Never take full-screen captures (`screencapture`). Use `--mp-shot file.png` (in-game only).
 - Verify from logs, not by assumption. Report what was not verified.
-- Keep changes small: one plugin file until a second module really needs splitting.
+- Never create standalone unit-test projects for Unity MonoBehaviours or Harmony patches (no
+  Unity runtime in `dotnet test`). Keep pure-C# `SelfCheck` assertions and verify gameplay via
+  `scripts/run.sh` logs.
+- New game system = one `Sync/` module + thin `Patches/` forwarding to it; one-off events go
+  through `Link.SendMessage` (reliable), continuous state through `Link.SendState`.
 
 ## Paths
 
@@ -24,7 +30,7 @@ Read this file and `STATUS.md` (imported at the bottom) before exploring anythin
 | Steam install (read-only) | `~/Library/Application Support/Steam/steamapps/common/Thronefall` |
 | Modded game clone | `game/thronefall.app` (+ `game/BepInEx/`, `game/run_bepinex.sh`) |
 | Game DLLs | `game/thronefall.app/Contents/Resources/Data/Managed/` |
-| Plugin source | `src/ThronefallMP/Plugin.cs`, `ThronefallMP.csproj` |
+| Plugin source | `src/ThronefallMP/{Plugin.cs,Net/,Sync/,Patches/}`, `ThronefallMP.csproj` |
 | Built plugin | `game/BepInEx/plugins/ThronefallMP/ThronefallMP.dll` (copied by the build) |
 | Decompiled game code | `decompiled/Assembly-CSharp/*.cs` (flat folder, one class per file) |
 | Logs | `game/player-host.log`, `game/player-client.log`, `game/BepInEx/LogOutput.log` |
@@ -63,22 +69,21 @@ Cursed Blowpipe, Falchion and Trap, Potion Vials, Battle Axe, Blood Wand.
 Host-authoritative co-op: the game is not deterministic (frame-time driven, `Random` in 81
 files), so the host simulates and clients send intents and render host state.
 
-Everything is in `src/ThronefallMP/Plugin.cs` today:
+- `Plugin.cs`: CLI flags, update loop, 20 Hz state send, `FollowHost` (client loads the host's
+  scene with host perks + own weapon), overlay, dev test flags (`--mp-test-night/-coins`).
+- `Net/Link.cs`: UDP; datagram = `[Protocol][kind][session]`; kinds State (unreliable, latest
+  wins), Message (reliable, in order), Ack. A changed session id = peer restarted. `Net/Reliable.cs`:
+  pure-C# seq/ack/resend with `SelfCheck` (runs at startup, logs an error on failure).
+- `Sync/PlayerSync.cs`: `State` packet, remote avatar (cloned from the local player inside
+  `PlayerMovement.Awake`, stripped to `Hp`/`TaggedObject`/`OneShotAnimationBase`, **not** a
+  `PlayerMovement`), host-owned damage forwarding.
+- `Sync/MatchSync.cs`: host owns day/night (client's `DayNightCycle.Update` is frozen, it is
+  switched to the host's state) and the treasury (host balance pushed on change; client forwards
+  its own coin/core gains and spends as deltas).
+- `Patches/GamePatches.cs`, `Patches/InputPatches.cs`: thin Harmony patches. Input: unfocused MP
+  window makes `Rewired.Player.GetAxis*/GetButton*` return nothing.
 
-- `Plugin` (BaseUnityPlugin): CLI flags, UDP socket, 20 Hz `State` packet (`Encode`/`Decode`,
-  `Protocol` byte, `SelfCheck` round-trip assert), overlay label.
-- `State`: scene, position, yaw, moving/sprinting/dead, attack counter, cumulative
-  `DamageToPeer`, weapon name, loadout names. State is resent constantly, so UDP loss heals itself.
-- `FollowHost`: client loads whatever scene the host's player is in, with host perks + own weapon.
-- `BuildGhost`/`UpdateGhost`: the remote player's avatar. Cloned from the local player inside
-  `PlayerMovement.Awake` (the only moment all weapon models still exist), stripped of every
-  game script except `Hp`, `TaggedObject` and `OneShotAnimationBase`. It is **not** a
-  `PlayerMovement`; this avoids the ~100 single-player call sites.
-- Harmony patches (bottom of file): `SaveProfilePatch`, `PlayerSpawnPatch`, `AttackPatch`,
-  `DamagePatch` (host counts damage to the avatar; client's player only takes host damage).
-
-Planned split when a second module arrives: `Net/` (transport), `Sync/` (one module per game
-system), `Patches/` (thin, one file per game class), `QoL/`. Details: `docs/ARCHITECTURE.md`.
+Planned: `QoL/` for non-MP tweaks. Details: `docs/ARCHITECTURE.md`.
 
 ## Game code cheat-sheet (`decompiled/Assembly-CSharp/`)
 

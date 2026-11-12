@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <LangVersion>latest</LangVersion>
-    <Version>0.2.0</Version>
+    <Version>0.4.0</Version>
     <GameDir>$(MSBuildThisFileDirectory)../../game</GameDir>
     <Managed>$(GameDir)/thronefall.app/Contents/Resources/Data/Managed</Managed>
     <PluginDir>$(GameDir)/BepInEx/plugins/ThronefallMP</PluginDir>
@@ -13,6 +13,7 @@
     <Reference Include="$(GameDir)/BepInEx/core/BepInEx.dll" Private="false" />
     <Reference Include="$(GameDir)/BepInEx/core/0Harmony.dll" Private="false" />
     <Reference Include="$(Managed)/Assembly-CSharp.dll" Private="false" />
+    <Reference Include="$(Managed)/Rewired_Core.dll" Private="false" />
     <Reference Include="$(Managed)/UnityEngine.dll" Private="false" />
     <Reference Include="$(Managed)/UnityEngine.CoreModule.dll" Private="false" />
     <Reference Include="$(Managed)/UnityEngine.IMGUIModule.dll" Private="false" />

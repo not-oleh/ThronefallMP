@@ -3,9 +3,10 @@
 An open-source, macOS-first multiplayer (and quality-of-life) mod for
 [Thronefall](https://store.steampowered.com/app/2239150/Thronefall/), built on BepInEx 5 + Harmony.
 
-**Status: prototype (0.2.0).** Two game instances connect over UDP. The client follows the
-host into levels with the host's loadout, and each side shows the other player as an avatar
-that enemies can target. Each instance still simulates its own world (enemies, buildings and
+**Status: prototype (0.3.0).** Two game instances connect over UDP. The client follows the
+host into levels with the host's perks (keeping its own weapon), and each side shows the other
+player as an avatar with its weapon and animations. Enemies can target the avatar; damage the
+host's enemies deal to it is applied to the client's player. Each instance still simulates its own world (enemies, buildings and
 coins are not shared yet) — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the roadmap.
 
 You need to own the game on Steam. This repository contains no game files.
@@ -43,7 +44,8 @@ Flags (after the mode): `--mp-autostart` skips the title screen (`--mp-autostart
 straight into that level), `--mp-join ip:port` joins another machine, `--mp-profile name` keeps saves in `mp-<name>/`, `--mp-shot file.png` saves a
 screenshot when the other player appears.
 
-Walk around in one window and the other player's avatar moves in the other. Enter a level
+Walk around in one window and the other player's avatar moves in the other. Only the focused
+window reads keyboard/mouse input, so two windows on one Mac control one character each. Enter a level
 on the host and the client follows. The top-left label shows the
 mod version, role, and whether the peer is connected.
 
@@ -59,3 +61,7 @@ game/               modded game copy            (gitignored)
 decompiled/         ILSpy output, for reading   (gitignored)
 tools/              ilspycmd, downloads         (gitignored)
 ```
+
+## License
+
+[MIT](LICENSE). Thronefall itself is © Grizzly Games; this repository contains none of its files.

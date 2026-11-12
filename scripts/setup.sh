@@ -7,11 +7,19 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 STEAM_GAME=${STEAM_GAME:-"$HOME/Library/Application Support/Steam/steamapps/common/Thronefall"}
 BEPINEX=5.4.23.6
 BEPINEX_SHA=2e711e21f6570da964fce4654b1976500dbe043f61778bce0008500078564638
-export DOTNET_ROOT=${DOTNET_ROOT:-/opt/homebrew/opt/dotnet/libexec}
+# ilspycmd needs the runtime of the `dotnet` on PATH (SDK 10). A DOTNET_ROOT left over from
+# another install (e.g. ~/.dotnet with only .NET 8) makes it fail, so derive it here.
+dotnet_dir=$(dirname "$(readlink -f "$(command -v dotnet)")")
+[ -d "$dotnet_dir/../libexec/shared" ] && dotnet_dir=$(cd "$dotnet_dir/../libexec" && pwd)
+export DOTNET_ROOT="$dotnet_dir"
 
 mkdir -p "$ROOT/game" "$ROOT/tools/dl"
+[ -d "$STEAM_GAME/thronefall.app" ] || { echo "Thronefall not found at $STEAM_GAME (set STEAM_GAME)" >&2; exit 1; }
+# Clone next to the old copy first, so a failed copy never leaves game/ without the app.
+rm -rf "$ROOT/game/thronefall.app.new"
+cp -Rc "$STEAM_GAME/thronefall.app" "$ROOT/game/thronefall.app.new"
 rm -rf "$ROOT/game/thronefall.app"
-cp -Rc "$STEAM_GAME/thronefall.app" "$ROOT/game/"
+mv "$ROOT/game/thronefall.app.new" "$ROOT/game/thronefall.app"
 
 zip="$ROOT/tools/dl/bepinex-$BEPINEX.zip"
 [ -f "$zip" ] || curl -sfL -o "$zip" \

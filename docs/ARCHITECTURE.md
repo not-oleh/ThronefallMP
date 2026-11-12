@@ -41,8 +41,8 @@ Rules that keep it maintainable:
 - Every message carries a protocol version; host and client refuse to pair on mismatch.
 - The mod is inert in single player unless a QoL toggle is on. No save-format changes.
 
-Today all of this is one file, `src/ThronefallMP/Plugin.cs`. It gets split along the lines
-above when the second module arrives, not before.
+The split is done: `Net/` (`Link` UDP transport, `Reliable` ack/resend), `Sync/` (`PlayerSync`,
+`MatchSync`), `Patches/`, and a thin `Plugin.cs` (flags, update loop, scene following, overlay).
 
 ## Local testing on one Mac
 
@@ -59,7 +59,7 @@ above when the second module arrives, not before.
 | Milestone | Scope | Done when |
 |---|---|---|
 | **M0 — Toolchain** ✅ | BepInEx on arm64, decompile, repo, launcher, UDP ghost | Two local instances show each other's ghost |
-| **M1 — Second player in the world** 🟡 | Done: client follows host scene changes and loadout; remote player is an avatar cloned from the local player, registered with `TagManager` (`Player`, `PlayerOwned`, alive) so enemies target it. Open: avatar takes no damage and has no attack animation; each player's own weapon choice | Both players walk into a level together and enemies target either |
+| **M1 — Second player in the world** 🟡 (0.3.0) | Done: client follows host scene changes and the host's perks while keeping its own weapon; remote player is an avatar cloned from the local player (own weapon model, walk/sprint/attack animation), registered with `TagManager` so enemies target it; the host forwards damage dealt to the avatar and the client's player takes it; the avatar hides while the peer is dead; only the focused window reads input. Open: remote attack animation, perk copy and human-driven movement not yet observed in a test; second machine untested | Both players walk into a level together and enemies target either |
 | **M2 — Shared match state** | Day/night, coins and energy cores, build slots and upgrades, upgrade choices, win/lose | A full level can be played to the end with building and economy in sync |
 | **M3 — Combat** | Enemy spawn/position/health replication, player attacks and damage, unit commands, revive | Nights look the same on both screens |
 | **M4 — Release quality** | Steam lobbies and invites, reconnect, version handshake UI, Craaghelm bosses, Eternal Trials | A friend can join via Steam overlay |
