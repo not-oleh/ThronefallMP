@@ -3,9 +3,10 @@
 An open-source, macOS-first multiplayer (and quality-of-life) mod for
 [Thronefall](https://store.steampowered.com/app/2239150/Thronefall/), built on BepInEx 5 + Harmony.
 
-**Status: prototype (0.1.0).** Two game instances connect over UDP and see each other's
-character as a visual "ghost". No gameplay is synchronised yet — see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and roadmap.
+**Status: prototype (0.2.0).** Two game instances connect over UDP. The client follows the
+host into levels with the host's loadout, and each side shows the other player as an avatar
+that enemies can target. Each instance still simulates its own world (enemies, buildings and
+coins are not shared yet) — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the roadmap.
 
 You need to own the game on Steam. This repository contains no game files.
 
@@ -38,11 +39,12 @@ scripts/run.sh both --mp-autostart
 | `scripts/run.sh client` | Join `127.0.0.1:27015`, using a separate save profile |
 | `scripts/run.sh both` | Host + client on the same Mac, windowed |
 
-Flags (after the mode): `--mp-autostart` skips the title screen, `--mp-join ip:port` joins another
-machine, `--mp-profile name` keeps saves in `mp-<name>/`, `--mp-shot file.png` saves a
+Flags (after the mode): `--mp-autostart` skips the title screen (`--mp-autostart Nordfels` goes
+straight into that level), `--mp-join ip:port` joins another machine, `--mp-profile name` keeps saves in `mp-<name>/`, `--mp-shot file.png` saves a
 screenshot when the other player appears.
 
-Walk around in one window and the ghost moves in the other. The top-left label shows the
+Walk around in one window and the other player's avatar moves in the other. Enter a level
+on the host and the client follows. The top-left label shows the
 mod version, role, and whether the peer is connected.
 
 Logs: `game/BepInEx/LogOutput.log`, `game/player-host.log`, `game/player-client.log`.

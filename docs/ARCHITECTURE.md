@@ -52,18 +52,27 @@ above when the second module arrives, not before.
 - `Application.runInBackground` keeps the unfocused window simulating.
 - `--mp-profile client` redirects the client's saves to `mp-client/`.
 - `--mp-autostart` and `--mp-shot` allow unattended smoke tests: launch, wait, check the logs
-  for `Peer connected` and `Ghost spawned`.
+  for `Peer connected`, `Following host to …` and `Avatar targetable`.
 
 ## Roadmap
 
 | Milestone | Scope | Done when |
 |---|---|---|
 | **M0 — Toolchain** ✅ | BepInEx on arm64, decompile, repo, launcher, UDP ghost | Two local instances show each other's ghost |
-| **M1 — Real second player** | Reliable transport (LiteNetLib); client follows host scene changes; remote player is a full avatar with weapon and animations; remove the `instance`/`GetPlayer(0)` assumptions on the host | Both players walk into a level together and enemies target either |
+| **M1 — Second player in the world** 🟡 | Done: client follows host scene changes and loadout; remote player is an avatar cloned from the local player, registered with `TagManager` (`Player`, `PlayerOwned`, alive) so enemies target it. Open: avatar takes no damage and has no attack animation; each player's own weapon choice | Both players walk into a level together and enemies target either |
 | **M2 — Shared match state** | Day/night, coins and energy cores, build slots and upgrades, upgrade choices, win/lose | A full level can be played to the end with building and economy in sync |
 | **M3 — Combat** | Enemy spawn/position/health replication, player attacks and damage, unit commands, revive | Nights look the same on both screens |
 | **M4 — Release quality** | Steam lobbies and invites, reconnect, version handshake UI, Craaghelm bosses, Eternal Trials | A friend can join via Steam overlay |
 | **QoL track** (parallel) | Small independent toggles, added on request | Each ships on its own |
 
-Biggest risks: the ~100 single-player call sites (M1), and bandwidth for enemy replication on
-late waves (M3). Both get a spike before the milestone is committed to.
+Decisions taken in M1:
+
+- **The remote player is not a `PlayerMovement`.** It is a stripped clone carrying only visuals,
+  colliders, `TaggedObject` and `Hp`. That sidesteps the ~100 single-player call sites instead of
+  rewriting them; they only matter again if the host must run a second *controllable* player.
+- **No LiteNetLib yet.** Everything synced so far is state that is resent 20 times a second, so
+  loss is self-healing. A reliable transport arrives with the first one-off event (M2: build,
+  pick an upgrade).
+
+Biggest risks: clients currently run their own simulation, so M2/M3 must switch the client to
+rendering host state; and bandwidth for enemy replication on late waves (M3).

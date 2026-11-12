@@ -7,24 +7,27 @@ using BepInEx;
 using HarmonyLib;
 using Thronefall.SaveServices;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace ThronefallMP;
 
-/// Prototype: two instances exchange their player's position over UDP and each
-/// shows the other as a visual-only "ghost". No gameplay is synced yet.
+/// Two instances exchange player state over UDP. Each shows the other player as an
+/// avatar that enemies can target, and the client follows the host's scene and loadout.
+/// Each instance still simulates its own world; shared match state comes next.
 ///
 /// Command line:
 ///   --mp-host [port]         listen (default port 27015)
 ///   --mp-join [ip[:port]]    connect (default 127.0.0.1:27015)
 ///   --mp-profile name        keep saves in a separate sub-folder
-///   --mp-autostart           skip the title screen (dev convenience)
+///   --mp-autostart [scene]   skip the title screen; with a scene name, load that level
 ///   --mp-shot file.png       save a screenshot once the ghost appears (dev/CI check)
-[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.1.0")]
+[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.2.0")]
 public class Plugin : BaseUnityPlugin
 {
     const int DefaultPort = 27015;
     const float SendInterval = 1f / 20f;
     const float PeerTimeout = 3f;
+    const byte Protocol = 2;
 
     internal static string Profile;
 
@@ -34,9 +37,12 @@ public class Plugin : BaseUnityPlugin
     float nextSend, lastHeard = -999f;
     State remote;
     GameObject ghost;
+    Transform ghostMesh;
     Animator ghostAnimator;
+    Hp ghostHp;
+    TaggedObject ghostTag;
     bool autostart;
-    string shotPath;
+    string autostartScene, shotPath;
 
     struct State
     {
@@ -44,6 +50,7 @@ public class Plugin : BaseUnityPlugin
         public Vector3 Pos;
         public float Yaw;
         public bool Moving, Sprinting;
+        public string[] Loadout;
     }
 
     void Awake()
@@ -59,6 +66,7 @@ public class Plugin : BaseUnityPlugin
 
         Profile = After("--mp-profile");
         autostart = args.Contains("--mp-autostart");
+        autostartScene = After("--mp-autostart");
         shotPath = After("--mp-shot");
 
         if (args.Contains("--mp-host"))
@@ -91,7 +99,8 @@ public class Plugin : BaseUnityPlugin
         if (autostart && SceneTransitionManager.instance != null && Time.realtimeSinceStartup > 6f)
         {
             autostart = false;
-            SceneTransitionManager.instance.TransitionFromNullToLevelSelect();
+            if (autostartScene == null) SceneTransitionManager.instance.TransitionFromNullToLevelSelect();
+            else EnterLevel(autostartScene);
         }
 
         if (udp == null) return;
@@ -116,21 +125,51 @@ public class Plugin : BaseUnityPlugin
         }
 
         var me = PlayerMovement.instance;
-        if (me != null && peer != null && Time.unscaledTime >= nextSend)
+        if (peer != null && Time.unscaledTime >= nextSend)
         {
             nextSend = Time.unscaledTime + SendInterval;
-            var bytes = Encode(new State
-            {
-                Scene = me.gameObject.scene.name,
-                Pos = me.transform.position,
-                Yaw = me.meshParent.eulerAngles.y,
-                Moving = me.Moving,
-                Sprinting = me.Sprinting,
-            });
+            // Sent even without a player (Scene "") so the host learns our address from the menu.
+            var state = new State { Scene = "" };
+            if (me != null)
+                state = new State
+                {
+                    Scene = me.gameObject.scene.name,
+                    Pos = me.transform.position,
+                    Yaw = me.meshParent.eulerAngles.y,
+                    Moving = me.Moving,
+                    Sprinting = me.Sprinting,
+                    // shortcut: loadout resent 20x/s instead of once reliably; fine on LAN,
+                    // move to a reliable message with the real transport.
+                    Loadout = PerkManager.instance.CurrentlyEquipped.Select(e => e.name).ToArray(),
+                };
+            var bytes = Encode(state);
             try { udp.Send(bytes, bytes.Length, peer); } catch (SocketException) { }
         }
 
+        FollowHost();
         UpdateGhost(me);
+    }
+
+    /// Client only: whenever the host's player is in a different scene, go there
+    /// with the host's loadout.
+    void FollowHost()
+    {
+        var stm = SceneTransitionManager.instance;
+        if (role != "client" || !PeerAlive || string.IsNullOrEmpty(remote.Scene)) return;
+        if (stm == null || stm.SceneTransitionIsRunning || PerkManager.instance == null) return;
+        if (SceneManager.GetActiveScene().name == remote.Scene) return;
+
+        var equipped = PerkManager.instance.CurrentlyEquipped;
+        equipped.Clear();
+        equipped.AddRange(PerkManager.instance.allEquippables.Where(e => remote.Loadout.Contains(e.name)));
+        Logger.LogInfo($"Following host to {remote.Scene} with {equipped.Count} equippables");
+        EnterLevel(remote.Scene);
+    }
+
+    static void EnterLevel(string scene)
+    {
+        LocalGamestate.SelectedGameMode = LocalGamestate.GameMode.Classic;
+        SceneTransitionManager.instance.TransitionFromNullToLevel(scene);
     }
 
     bool PeerAlive => Time.unscaledTime - lastHeard < PeerTimeout;
@@ -147,39 +186,81 @@ public class Plugin : BaseUnityPlugin
         if (ghost == null)
         {
             ghost = MakeGhost(me);
-            ghost.transform.position = remote.Pos;
         }
 
         var t = ghost.transform;
         t.position = Vector3.Lerp(t.position, remote.Pos, 15f * Time.unscaledDeltaTime);
-        t.rotation = Quaternion.Euler(0f, remote.Yaw, 0f);
-        if (ghostAnimator != null)
+        ghostMesh.rotation = Quaternion.Euler(0f, remote.Yaw, 0f);
+        ghostAnimator.SetBool("Moving", remote.Moving);
+        ghostAnimator.SetBool("Sprinting", remote.Sprinting);
+
+        // shortcut: the avatar attracts enemies but takes no damage (the game clears this flag
+        // every dusk, hence per frame). Real damage needs the client's health synced: M3.
+        ghostHp.invulnerable = true;
+
+        // Game code reads Players[0] as "the" player; keep the local one first.
+        if (TagManager.instance.Players[0] == ghostTag)
         {
-            ghostAnimator.SetBool("Moving", remote.Moving);
-            ghostAnimator.SetBool("Sprinting", remote.Sprinting);
+            ghostTag.enabled = false;
+            ghostTag.enabled = true;
         }
     }
 
-    /// Clone only the local player's visuals. Cloned under an inactive parent so no
-    /// game script on the copy ever runs Awake before we strip it.
+    /// Clone the local player, keeping only visuals, colliders, tags and health: enough for
+    /// enemies to see and attack it. Cloned under an inactive parent so no game script on
+    /// the copy runs before we strip it (several of them overwrite static singletons).
     GameObject MakeGhost(PlayerMovement me)
     {
         var holder = new GameObject("MP Ghost holder");
         holder.SetActive(false);
-        var clone = Instantiate(me.meshParent.gameObject, holder.transform);
+        var clone = Instantiate(me.gameObject, holder.transform);
         clone.name = "MP Ghost";
 
-        foreach (var c in Enumerable.Reverse(clone.GetComponentsInChildren<Component>(true)))
-            if (c is MonoBehaviour || c is Collider)
+        var movement = clone.GetComponent<PlayerMovement>();
+        ghostMesh = movement.meshParent;
+        ghostAnimator = movement.meshAnimator;
+        ghostHp = clone.GetComponent<Hp>();
+        ghostTag = clone.GetComponent<TaggedObject>();
+
+        // The game deletes unequipped weapon models in Start; our copy never runs that.
+        foreach (var w in clone.GetComponentsInChildren<WeaponEquipper>(true))
+            if (!PerkManager.IsEquipped(w.requiredWeapon))
+                DestroyImmediate(w.gameObject);
+
+        // Game scripts first: several [RequireComponent] the pathfinding/controller ones.
+        bool Strip(Component c) => c != null && c != ghostHp && c != ghostTag;
+        var all = clone.GetComponentsInChildren<Component>(true);
+        foreach (var c in all)
+            if (Strip(c) && c is MonoBehaviour && c.GetType().Assembly == typeof(PlayerMovement).Assembly)
+                DestroyImmediate(c);
+        foreach (var c in all)
+            if (Strip(c) && (c is MonoBehaviour || c is CharacterController))
                 DestroyImmediate(c);
 
-        clone.transform.SetParent(null, false);
-        clone.transform.localScale = me.meshParent.lossyScale;
+        clone.transform.SetParent(null, true);
         Destroy(holder);
-        ghostAnimator = clone.GetComponentInChildren<Animator>(true);
-        Logger.LogInfo($"Ghost spawned in {remote.Scene} at {remote.Pos}");
+        clone.transform.position = remote.Pos;
+
+        bool hitLogged = false;
+        ghostHp.OnHit.AddListener(from =>
+        {
+            if (hitLogged) return;
+            hitLogged = true;
+            Logger.LogInfo($"Avatar was attacked by {(from != null ? from.name : "unknown")}");
+        });
+
+        Logger.LogInfo($"Avatar spawned in {remote.Scene} at {remote.Pos}");
         if (shotPath != null) Invoke(nameof(Shot), 2f);
+        Invoke(nameof(LogTargetable), 1f);
         return clone;
+    }
+
+    /// Enemies pick targets from TagManager by tag, so this is what "targetable" means.
+    void LogTargetable()
+    {
+        if (ghostTag == null) return;
+        Logger.LogInfo($"Avatar targetable: players={TagManager.instance.Players.Count}, "
+            + $"alive={ghostTag.Tags.Contains(TagManager.ETag.AUTO_Alive)}, tags=[{string.Join(",", ghostTag.Tags)}]");
     }
 
     void Windowed() => Screen.SetResolution(1280, 720, FullScreenMode.Windowed);
@@ -198,30 +279,38 @@ public class Plugin : BaseUnityPlugin
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
+        w.Write(Protocol);
         w.Write(s.Scene ?? "");
         w.Write(s.Pos.x); w.Write(s.Pos.y); w.Write(s.Pos.z);
         w.Write(s.Yaw);
         w.Write((byte)((s.Moving ? 1 : 0) | (s.Sprinting ? 2 : 0)));
+        var loadout = s.Loadout ?? Array.Empty<string>();
+        w.Write((byte)loadout.Length);
+        foreach (var name in loadout) w.Write(name);
         return ms.ToArray();
     }
 
     static State Decode(byte[] data)
     {
         using var r = new BinaryReader(new MemoryStream(data));
+        if (r.ReadByte() != Protocol) throw new FormatException("protocol mismatch");
         var s = new State { Scene = r.ReadString() };
         s.Pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
         s.Yaw = r.ReadSingle();
         byte flags = r.ReadByte();
         s.Moving = (flags & 1) != 0;
         s.Sprinting = (flags & 2) != 0;
+        s.Loadout = new string[r.ReadByte()];
+        for (int i = 0; i < s.Loadout.Length; i++) s.Loadout[i] = r.ReadString();
         return s;
     }
 
     static bool SelfCheck()
     {
-        var a = new State { Scene = "x", Pos = new Vector3(1, 2, 3), Yaw = 90f, Sprinting = true };
+        var a = new State { Scene = "x", Pos = new Vector3(1, 2, 3), Yaw = 90f, Sprinting = true, Loadout = new[] { "Bow" } };
         var b = Decode(Encode(a));
-        return b.Scene == a.Scene && b.Pos == a.Pos && b.Yaw == a.Yaw && b.Sprinting && !b.Moving;
+        return b.Scene == a.Scene && b.Pos == a.Pos && b.Yaw == a.Yaw && b.Sprinting && !b.Moving
+            && b.Loadout.SequenceEqual(a.Loadout);
     }
 }
 
