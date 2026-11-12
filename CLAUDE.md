@@ -80,6 +80,8 @@ files), so the host simulates and clients send intents and render host state.
 - `Sync/MatchSync.cs`: host owns day/night (client's `DayNightCycle.Update` is frozen, it is
   switched to the host's state) and the treasury (host balance pushed on change; client forwards
   its own coin/core gains and spends as deltas).
+- `Sync/BuildSync.cs`: buildings + upgrade choices, hooked at `BuildSlot.OnUpgradeChoiceComplete`;
+  slot id = `SaveLoadEntity.GUID`. Host logs/broadcasts, client requests; idempotent by level.
 - `Patches/GamePatches.cs`, `Patches/InputPatches.cs`: thin Harmony patches. Input: unfocused MP
   window makes `Rewired.Player.GetAxis*/GetButton*` return nothing.
 

@@ -89,3 +89,17 @@ static class TreasuryPatch
     [HarmonyPostfix, HarmonyPatch(nameof(PlayerInteraction.SpendEnergyCores))]
     static void SpendCores(int amount) => Plugin.Instance.Match.LocalChange(0, -amount);
 }
+
+
+/// Every completed build/upgrade (incl. the branch chosen) goes through here; BuildSync shares it.
+/// BuildSlotExt overrides the method but calls base, so patching BuildSlot covers both.
+[HarmonyPatch(typeof(BuildSlot), nameof(BuildSlot.OnUpgradeChoiceComplete))]
+static class BuildPatch
+{
+    static void Prefix(BuildSlot __instance, out int __state) => __state = BuildSync.LevelField(__instance);
+
+    static void Postfix(BuildSlot __instance, Choice _choiceMade, int __state)
+    {
+        if (BuildSync.LevelField(__instance) > __state) Plugin.Instance.Builds.Completed(__instance, _choiceMade);
+    }
+}

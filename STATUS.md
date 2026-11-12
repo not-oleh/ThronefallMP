@@ -1,34 +1,34 @@
 # Status
 
-Last updated: 2026-11-12 (night) · plugin version 0.4.0 · protocol 4 · MIT licensed
+Last updated: 2026-11-12 (late) · plugin version 0.5.0 · protocol 5 · MIT licensed
 
 ## Working now
 
-- Toolchain: BepInEx loads natively on Apple Silicon; build deploys into `game/`.
-- Two local instances connect over UDP (`scripts/run.sh both`).
-- Client follows the host into any scene, starting from the title screen.
+- Toolchain (BepInEx native on Apple Silicon); two local instances over UDP; client follows the
+  host into any scene from the title screen.
 - Remote player avatar: position, facing, walk/sprint animation, own weapon model.
 - Client keeps its own weapon and takes the host's other perks.
-- Damage: host's enemies hit the avatar → damage is forwarded → client's player loses health.
-  Client logs once per burst (gap 3 s, max 10 s), e.g. `Took 27.5 damage from the host's world
-  (11 hits, hp now 23.45)`: 7 lines per night instead of ~55.
+- Damage: host's enemies hit the avatar → forwarded → client loses health (logged once per burst).
 - Avatar hides when the peer dies: `Avatar hidden (peer is dead)` then `Avatar shown` on revive
   (host log, 2026-11-12 test-night run 1; the client regenerates, so death is not reliable).
-- Unfocused window gets no input: `Rewired.Player` `GetAxis*/GetButton*/GetNegativeButton*` return
-  nothing unless this process is frontmost (`Patches/InputPatches.cs`, MP only). "Frontmost" =
-  `NSRunningApplication.currentApplication.isActive` via libobjc, cached per frame; Unity's
-  `Application.isFocused` is stuck when two instances share one bundle (human-reported: true on the
-  host, false on the client). Falls back to `isFocused` off macOS. Focus changes are logged:
-  `Window focus: False (Unity says True, input blocked)`. Unattended run confirmed both signals
-  disagree (AppKit False, Unity True) and the plugin still ran; **a human click test is still open**.
-- Overlay is crisp on Retina (verified by the user).
+- Unfocused window gets no input (`Patches/InputPatches.cs`, MP only): `Rewired.Player` reads return
+  nothing unless AppKit says this process is active (falls back to `Application.isFocused`).
+  Untestable on one Mac (see dead ends).
 - Reliable messages (`Net/Reliable.cs`, seq/ack/resend, in order, session id detects restarts);
   startup `SelfCheck` covers packets and a lossy reliable run.
 - Shared day/night: host's cycle rules; client's `DayNightCycle.Update` is frozen while the host is
   in its scene and it is switched to the host's state (`Match: time follows host -> Night`).
 - Shared treasury: host balance pushed on change; client forwards its own coin/core deltas.
   Test (`--mp-test-coins`): 8 start, host +10, client +5 → both read 23, no double counting.
-- Overlay font scales with window height (14–48 px), with a drop shadow.
+- Shared buildings + upgrade choices (`Sync/BuildSync.cs`): sync point is
+  `BuildSlot.OnUpgradeChoiceComplete` (slot, new level, branch). Slot id = `SaveLoadEntity.GUID`
+  (scene-serialized; fallback hierarchy path + position); 60 slots indexed identically on Nordfels.
+  Host logs + broadcasts every upgrade (resent on reconnect, epoch per match); client applies its
+  own at once and sends a request, host applies and echoes; idempotent by level, no coins charged
+  (the interactor already spent them via the treasury). Test 2026-11-12 (`--mp-test-night`):
+  host castle L1/L2 → client `Build: follows host`; client Archery Range → host `Build: peer built`.
+- Night → day with the client following: `Match: time follows host -> Day` (host Long Bow cleared wave 1).
+- Overlay: crisp on Retina (user-verified), font scales with window height.
 - `scripts/setup.sh` runs end to end (needs to run outside the agent sandbox: Steam dir + GPU).
 - Client saves are isolated in `mp-client/`.
 
@@ -36,18 +36,22 @@ Last updated: 2026-11-12 (night) · plugin version 0.4.0 · protocol 4 · MIT li
 
 - [x] M0 Toolchain, repo, UDP ghost
 - [x] M1 Second player in the world (human checks below are leftovers, not blockers)
-- [~] M2 Shared match state — done: code split, reliable layer, day/night, coins/cores. Left: buildings, upgrade choices, wave state
+- [~] M2 Shared match state — done: code split, reliable layer, day/night, coins/cores, buildings,
+      upgrade choices. Left: wave/enemy state (moves into M3)
 - [ ] M3 Combat (enemy replication, client attacks hurting host enemies, revive)
 - [ ] M4 Steam lobbies/invites, reconnect, Craaghelm bosses, Eternal Trials
 - [ ] QoL track (nothing requested yet)
 
 ## Not verified
 
-- Window-focus block with a human: click each window, confirm only the clicked King moves. Expect
-  `Window focus: True/False` lines flipping per click. If AppKit's `isActive` misbehaves the log
-  shows `AppKit focus query unavailable` (then it falls back to Unity's flag).
-- Energy cores sync: no DLC in the test runs (cores stayed 0); code path untested.
-- Day→night→day with the client following (night start verified; the return to day was not reached).
+- Window-focus block: cannot be tested on one Mac (see dead ends); needs two machines.
+- Energy cores sync: no DLC on this account (`craaghelm=False`, cores stayed 0, no null refs);
+  the DLC path is still untested.
+- Build sync via the real UI (hold-to-fill, choice frame), boosts (`ApplyBoost`, not synced),
+  perk-driven upgrades on load, mid-match save loads (`ApplyLoadedUpgradesDelayed` bypasses the
+  hook, so a client would not get them).
+- Both players upgrading the same slot at once: host rejects the second (logged), the client keeps
+  its local result and may have paid twice. Treasury can go negative in that race.
 - Client coin pickups from its own world are forwarded as income (its world is still its own
   simulation until M3), so a client in a coin-rich world inflates the shared treasury.
 - Remote attack animation, host perks (non-weapon), human-driven movement, second machine, night screenshot.
@@ -56,22 +60,23 @@ Last updated: 2026-11-12 (night) · plugin version 0.4.0 · protocol 4 · MIT li
 
 Simple (Sonnet-friendly):
 
-- [ ] Two-window human test: walk in one window, confirm the other character stays put (+ read `Window focus:` lines).
-- [x] Avatar re-show after death logs `players=2` (2026-11-12, `--mp-test-night`, twice).
+- [ ] Human test of build sync through the real UI (fill a slot on the client, pick a castle branch).
 - [ ] `--mp-shot` at night to eyeball the overlay size on Retina.
 
 Complex (architecture-heavy, use Opus/Fable):
 
-- [ ] Entity IDs for `TaggedObject`s so buildings/enemies can be addressed across instances.
-- [ ] M2 next slices: building placement + upgrade choices via reliable messages (host executes
-      `BuildSlot.ExecuteBuildOrUpgrade`), then wave/enemy state (client must stop its own spawner).
+- [ ] Entity IDs for enemies (buildings now use `BuildSync.SlotId`).
+- [ ] Wave/enemy state (client must stop its own spawner), building damage/destruction sync.
 - [ ] Client attacks affecting the host's enemies (intent message → host applies damage).
 - [ ] Steam P2P transport behind `Link` (same `SendState/SendMessage/Pump/Peer` surface).
 
 ## Known quirks and dead ends
 
-- **`ReInput.configuration.ignoreInputWhenAppNotInFocus` + patching `MoveScript`/`TryToAttack` did not
-  stop input** in a two-window human test (removed). Blocking at `Rewired.Player` level replaces it.
+- **Dual-window testing on one Mac sends keyboard input to both windows.** Both
+  `Application.isFocused` and `NSRunningApplication.isActive` stay active across duplicate `.app`
+  launches, and Rewired reads raw HID input. Focus-gating (`InputPatches.cs`) is left as-is; the
+  two-window human test is dropped. Real input tests need two machines.
+
 - **Reliable stream across restarts:** a restarted peer starts at seq 0; without a session id the other
   side would drop everything as duplicates. Reset only on a *changed* session, not on first contact
   (first contact on the client would otherwise wipe its already-acked stream).
@@ -121,5 +126,3 @@ Complex (architecture-heavy, use Opus/Fable):
   force the tutorial; `--mp-autostart` skips it without touching the save.
 - **Client experience today is odd by design:** it runs its own enemies, which cannot hurt
   it, while invisible host enemies can. Goes away when M3 replicates enemies.
-- Two early launches exited for unknown reasons (possibly windows closed by hand). Not
-  reproduced since.

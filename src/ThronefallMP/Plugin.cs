@@ -12,7 +12,7 @@ namespace ThronefallMP;
 
 /// Two instances talk over UDP (Net/). Each shows the other player as an avatar that enemies
 /// can target (Sync/PlayerSync), and the client follows the host's scene, perks, day/night and
-/// treasury (Sync/MatchSync). Everything else is still simulated per instance.
+/// treasury (Sync/MatchSync) and buildings (Sync/BuildSync). Everything else is still simulated per instance.
 ///
 /// Command line:
 ///   --mp-host [port]         listen (default port 27015)
@@ -20,11 +20,11 @@ namespace ThronefallMP;
 ///   --mp-profile name        keep saves in a separate sub-folder
 ///   --mp-autostart [scene]   skip the title screen; with a scene name, load that level
 ///   --mp-equip a,b           equip these by name before entering a level (dev/CI)
-///   --mp-test-night          host: build the castle, start the night and park the
-///                            avatar on the nearest enemy (dev/CI)
+///   --mp-test-night          host: build + upgrade the castle, start the night and park
+///                            the avatar on the nearest enemy; client: build one slot (dev/CI)
 ///   --mp-test-coins          both: change the treasury once the avatar appears (dev/CI)
 ///   --mp-shot file.png       save a screenshot once the avatar appears (dev/CI)
-[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.4.0")]
+[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.5.0")]
 public class Plugin : BaseUnityPlugin
 {
     const int DefaultPort = 27015;
@@ -38,6 +38,7 @@ public class Plugin : BaseUnityPlugin
     internal Link link;
     internal PlayerSync Players;
     internal MatchSync Match;
+    internal BuildSync Builds;
     float nextSend, lastHeard = -999f;
     bool autostart, testNight, testChase, testCoins, shotTaken;
     string autostartScene, shotPath;
@@ -86,13 +87,19 @@ public class Plugin : BaseUnityPlugin
         if (link != null)
         {
             Match = new MatchSync(this, link);
+            Builds = new BuildSync(this, link);
             Players.AvatarShown += OnAvatarShown;
             // Two instances on one Mac: the unfocused one must keep simulating.
             Application.runInBackground = true;
             // Delayed: the game re-applies its saved video settings during startup.
             Invoke(nameof(Windowed), 4f);
         }
-        else Match = new MatchSync(this, new Link(null, null, () => 0f));
+        else
+        {
+            var none = new Link(null, null, () => 0f);
+            Match = new MatchSync(this, none);
+            Builds = new BuildSync(this, none);
+        }
 
         new Harmony("dev.thronefallmp").PatchAll();
         Logger.LogInfo($"Thronefall MP loaded: role={role} profile={Profile ?? "(default)"}");
@@ -122,7 +129,7 @@ public class Plugin : BaseUnityPlugin
         lastMe = me;
 
         bool wasAlive = PeerAlive;
-        if (link.Pump(role == "host", Players.OnState, Match.OnMessage))
+        if (link.Pump(role == "host", Players.OnState, OnMessage))
         {
             lastHeard = Time.unscaledTime;
             if (!wasAlive)
@@ -130,6 +137,7 @@ public class Plugin : BaseUnityPlugin
                 Logger.LogInfo($"Peer connected: {link.Peer}");
                 rebase = true;
                 Match.ResendAll();
+                Builds.ResendAll();
             }
         }
 
@@ -142,9 +150,16 @@ public class Plugin : BaseUnityPlugin
         }
 
         Match.Tick(me);
+        Builds.Tick(me);
         if (testChase) Players.ChaseNearestEnemy();
         FollowHost();
         Players.UpdateGhost(me);
+    }
+
+    void OnMessage(byte[] data)
+    {
+        if (data.Length == 0) return;
+        if (data[0] >= BuildSync.MsgBuilt) Builds.OnMessage(data); else Match.OnMessage(data);
     }
 
     /// Runs `action` after `seconds` (scaled game time, like Invoke).
@@ -159,7 +174,7 @@ public class Plugin : BaseUnityPlugin
     void OnAvatarShown()
     {
         if (shotPath != null && !shotTaken) Invoke(nameof(Shot), 2f);
-        if (testNight && role == "host") Invoke(nameof(TestNight), 3f);
+        if (testNight) Invoke(role == "host" ? nameof(TestNight) : nameof(TestClientBuild), role == "host" ? 3f : 8f);
         if (testCoins) Invoke(nameof(TestCoins), 3f);
     }
 
@@ -204,8 +219,22 @@ public class Plugin : BaseUnityPlugin
         testNight = false;
         var castle = CastleCenter.instance.GetComponentInParent<BuildSlot>();
         castle.ExecuteBuildOrUpgrade(PlayerInteraction.instance, false);
-        Logger.LogInfo($"Test night: castle at {castle.transform.position}, me at {PlayerMovement.instance.transform.position}");
-        Invoke(nameof(TestNightStart), 2f);
+        Logger.LogInfo($"Test night: castle at {castle.transform.position}, me at {PlayerMovement.instance.transform.position}, "
+            + $"craaghelm={DlcConfiguration.IsDlcAvailable(IDlcProvider.DlcId.CRAAGHELM)}");
+        // Second castle level: a random branch of a (possible) choice, to check choice sync.
+        After(1f, () => castle.ExecuteBuildOrUpgrade(PlayerInteraction.instance, false));
+        Invoke(nameof(TestNightStart), 10f);
+    }
+
+    /// Client: build the first free blueprint (castle must already have come from the host).
+    void TestClientBuild()
+    {
+        testNight = false;
+        var slot = FindObjectsByType<BuildSlot>(FindObjectsSortMode.None)
+            .Where(s => s.Level == 0 && s.CanBeUpgraded && !s.ActivatorUpgradesThis && s.GetComponentInChildren<CastleCenter>(true) == null)
+            .OrderBy(s => BuildSync.SlotId(s), StringComparer.Ordinal).FirstOrDefault();
+        Logger.LogInfo($"Test build: client builds {(slot != null ? slot.buildingName + " " + BuildSync.SlotId(slot) : "nothing (no free slot)")}");
+        slot?.TryToBuildOrUpgradeAndPay(PlayerInteraction.instance, false);
     }
 
     void TestNightStart()
