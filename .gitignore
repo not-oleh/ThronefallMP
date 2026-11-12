@@ -1,0 +1,7 @@
+# Copyrighted game files, decompiled sources and downloaded tools never get committed.
+/game/
+/decompiled/
+/tools/
+bin/
+obj/
+.DS_Store
