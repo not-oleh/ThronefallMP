@@ -12,7 +12,7 @@ namespace ThronefallMP;
 
 /// Two instances talk over UDP (Net/). Each shows the other player as an avatar that enemies
 /// can target (Sync/PlayerSync), and the client follows the host's scene, perks, day/night and
-/// treasury (Sync/MatchSync) and buildings (Sync/BuildSync). Everything else is still simulated per instance.
+/// treasury (Sync/MatchSync), buildings (Sync/BuildSync) and the host's enemies (Sync/EnemySync). Everything else is still simulated per instance.
 ///
 /// Command line:
 ///   --mp-host [port]         listen (default port 27015)
@@ -24,7 +24,7 @@ namespace ThronefallMP;
 ///                            the avatar on the nearest enemy; client: build one slot (dev/CI)
 ///   --mp-test-coins          both: change the treasury once the avatar appears (dev/CI)
 ///   --mp-shot file.png       save a screenshot once the avatar appears (dev/CI)
-[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.5.0")]
+[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.6.0")]
 public class Plugin : BaseUnityPlugin
 {
     const int DefaultPort = 27015;
@@ -39,6 +39,7 @@ public class Plugin : BaseUnityPlugin
     internal PlayerSync Players;
     internal MatchSync Match;
     internal BuildSync Builds;
+    internal EnemySync Enemies;
     float nextSend, lastHeard = -999f;
     bool autostart, testNight, testChase, testCoins, shotTaken;
     string autostartScene, shotPath;
@@ -88,6 +89,7 @@ public class Plugin : BaseUnityPlugin
         {
             Match = new MatchSync(this, link);
             Builds = new BuildSync(this, link);
+            Enemies = new EnemySync(this, link);
             Players.AvatarShown += OnAvatarShown;
             // Two instances on one Mac: the unfocused one must keep simulating.
             Application.runInBackground = true;
@@ -99,6 +101,7 @@ public class Plugin : BaseUnityPlugin
             var none = new Link(null, null, () => 0f);
             Match = new MatchSync(this, none);
             Builds = new BuildSync(this, none);
+            Enemies = new EnemySync(this, none);
         }
 
         new Harmony("dev.thronefallmp").PatchAll();
@@ -129,7 +132,7 @@ public class Plugin : BaseUnityPlugin
         lastMe = me;
 
         bool wasAlive = PeerAlive;
-        if (link.Pump(role == "host", Players.OnState, OnMessage))
+        if (link.Pump(role == "host", OnState, OnMessage))
         {
             lastHeard = Time.unscaledTime;
             if (!wasAlive)
@@ -138,6 +141,7 @@ public class Plugin : BaseUnityPlugin
                 rebase = true;
                 Match.ResendAll();
                 Builds.ResendAll();
+                Enemies.ResendAll();
             }
         }
 
@@ -146,11 +150,14 @@ public class Plugin : BaseUnityPlugin
         if (link.Peer != null && Time.unscaledTime >= nextSend)
         {
             nextSend = Time.unscaledTime + SendInterval;
-            link.SendState(Players.Snapshot(me));
+            link.SendState(new byte[] { 0 }.Concat(Players.Snapshot(me)).ToArray());
+            var enemies = Enemies.HostSnapshot(me);
+            if (enemies != null) link.SendState(enemies);
         }
 
         Match.Tick(me);
         Builds.Tick(me);
+        Enemies.Tick(me);
         if (testChase) Players.ChaseNearestEnemy();
         FollowHost();
         Players.UpdateGhost(me);
@@ -159,7 +166,16 @@ public class Plugin : BaseUnityPlugin
     void OnMessage(byte[] data)
     {
         if (data.Length == 0) return;
-        if (data[0] >= BuildSync.MsgBuilt) Builds.OnMessage(data); else Match.OnMessage(data);
+        if (data[0] >= EnemySync.MsgSpawn) Enemies.OnMessage(data);
+        else if (data[0] >= BuildSync.MsgBuilt) Builds.OnMessage(data);
+        else Match.OnMessage(data);
+    }
+
+    /// State bodies start with a kind byte: 0 = player, EnemySync.StateKind = enemies + buildings.
+    void OnState(byte[] data)
+    {
+        if (data.Length == 0) return;
+        if (data[0] == EnemySync.StateKind) Enemies.OnState(data); else Players.OnState(data.Skip(1).ToArray());
     }
 
     /// Runs `action` after `seconds` (scaled game time, like Invoke).
@@ -247,7 +263,7 @@ public class Plugin : BaseUnityPlugin
 
     void TestStatus() => Logger.LogInfo($"Test status: {DayNightCycle.Instance.CurrentTimestate}, "
         + $"enemies={EnemySpawner.instance.NumberOfEnemiesOnTheMap}, avatar at {Players.ghost.transform.position} "
-        + $"active={Players.ghost.activeSelf}, Players.damageToPeer={Players.damageToPeer}, my hp={PlayerMovement.instance.Hp.HpValue}");
+        + $"active={Players.ghost.activeSelf}, Players.damageToPeer={Players.damageToPeer}, my hp={PlayerMovement.instance.Hp.HpValue}, {Enemies.Status()}");
 
     void Windowed() => Screen.SetResolution(1280, 720, FullScreenMode.Windowed);
 

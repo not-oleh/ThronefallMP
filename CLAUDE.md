@@ -82,6 +82,8 @@ files), so the host simulates and clients send intents and render host state.
   its own coin/core gains and spends as deltas).
 - `Sync/BuildSync.cs`: buildings + upgrade choices, hooked at `BuildSlot.OnUpgradeChoiceComplete`;
   slot id = `SaveLoadEntity.GUID`. Host logs/broadcasts, client requests; idempotent by level.
+- `Sync/EnemySync.cs`: host enemies get ids; spawn/despawn reliable, pos/hp in a second state packet
+  (state kind byte 0 = player, 1 = enemies); client spawning off, enemies shown as stripped puppets.
 - `Patches/GamePatches.cs`, `Patches/InputPatches.cs`: thin Harmony patches. Input: unfocused MP
   window makes `Rewired.Player.GetAxis*/GetButton*` return nothing.
 

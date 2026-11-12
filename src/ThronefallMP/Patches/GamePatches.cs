@@ -54,6 +54,9 @@ static class DamagePatch
             return false;
         }
 
+        // Client: host enemies are puppets; only the host's kill (EnemySync) may hurt them.
+        if (p.Enemies.IsPuppet(__instance)) return p.Enemies.applying;
+
         var me = PlayerMovement.instance;
         if (p.role == "client" && me != null && __instance == me.Hp)
         {
@@ -102,4 +105,11 @@ static class BuildPatch
     {
         if (BuildSync.LevelField(__instance) > __state) Plugin.Instance.Builds.Completed(__instance, _choiceMade);
     }
+}
+
+/// Client: while the host is in our scene its waves are the only ones; ours never spawn.
+[HarmonyPatch(typeof(Spawn), nameof(Spawn.Update))]
+static class SpawnPatch
+{
+    static bool Prefix() => !Plugin.Instance.Enemies.SuppressLocalWaves();
 }
