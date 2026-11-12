@@ -16,8 +16,11 @@ namespace ThronefallMP;
 ///    a host kill plays the game's own death (VFX, destroy) with coins and on-death spawns removed.
 class EnemySync
 {
-    internal const byte MsgSpawn = 20, MsgDespawn = 21;
+    internal const byte MsgSpawn = 20, MsgDespawn = 21, MsgHit = 22;
     internal const byte StateKind = 1;
+    /// Body budget per state datagram: Link adds 6 bytes; stays under a ~1.2 KB MTU.
+    internal const int MaxStateBody = 1150;
+    const int EnemyBytes = 2 + 12 + 1 + 4;
     static readonly AccessTools.FieldRef<Hp, Weapon> DeathAttackField = AccessTools.FieldRefAccess<Hp, Weapon>("spwanAttackOnDeath");
 
     struct Info { public int Epoch; public string Scene, Key; public Vector3 Pos; public bool Elite; public float MaxHp; }
@@ -41,7 +44,7 @@ class EnemySync
     readonly Dictionary<string, GameObject> prefabs = new();
     internal bool applying;
     EnemySpawner suppressedLoggedFor;
-    int built, killed;
+    int built, killed, hitsSent, hitsApplied;
 
     // Both: building hp, indexed by sorted slot id (identical on both instances).
     List<Hp> buildings;
@@ -76,7 +79,7 @@ class EnemySync
     // ---------- host ----------
 
     /// Host: called every state tick; returns the enemy state body (null when not in a match).
-    internal byte[] HostSnapshot(PlayerMovement me)
+    internal List<byte[]> HostSnapshot(PlayerMovement me)
     {
         if (p.role != "host" || me == null || TagManager.instance == null) return null;
         var pi = PlayerInteraction.instance;
@@ -116,23 +119,95 @@ class EnemySync
             link.SendMessage(Write(w => { w.Write(MsgDespawn); w.Write(epoch); w.Write(id); w.Write(killed); }));
         }
 
-        return Write(w =>
+        var enemies = tracked.Select(kv => (kv.Value.id, kv.Key.transform.position, (byte)(kv.Key.transform.eulerAngles.y / 360f * 256f), kv.Value.hp.HpValue)).ToList();
+        var damaged = Buildings(scene).Select((h, i) => (h, i)).Where(x => x.h != null && x.h.HpValue < x.h.maxHp)
+            .Select(x => ((ushort)x.i, Mathf.Max(0f, x.h.HpValue))).ToList();
+        return EncodeState(epoch, scene, enemies, damaged);
+    }
+
+    /// State body: [kind][epoch][scene][first][buildings, first chunk only][n][enemies]. Split into
+    /// as many datagrams as needed so each stays under MaxStateBody.
+    internal static List<byte[]> EncodeState(int epoch, string scene, List<(ushort id, Vector3 pos, byte yaw, float hp)> enemies, List<(ushort index, float hp)> buildings)
+    {
+        var chunks = new List<byte[]>();
+        int next = 0;
+        do
         {
-            w.Write(StateKind); w.Write(epoch); w.Write(scene);
-            // shortcut: full floats, ~20 bytes per enemy; a 200-enemy night is ~4 KB per datagram
-            // (fine on loopback/LAN). Quantize or split before the Steam transport (MTU ~1.2 KB).
-            w.Write((ushort)tracked.Count);
-            foreach (var kv in tracked)
+            bool first = chunks.Count == 0;
+            chunks.Add(Write(w =>
             {
-                var (id, hp) = kv.Value;
-                var t = kv.Key.transform;
-                w.Write(id); w.Write(t.position.x); w.Write(t.position.y); w.Write(t.position.z);
-                w.Write((byte)(t.eulerAngles.y / 360f * 256f)); w.Write(hp.HpValue);
-            }
-            var damaged = Buildings(scene).Select((h, i) => (h, i)).Where(x => x.h != null && x.h.HpValue < x.h.maxHp).ToList();
-            w.Write((ushort)damaged.Count);
-            foreach (var (h, i) in damaged) { w.Write((ushort)i); w.Write(Mathf.Max(0f, h.HpValue)); }
-        });
+                w.Write(StateKind); w.Write(epoch); w.Write(scene); w.Write(first);
+                if (first)
+                {
+                    // shortcut: buildings are not split; ~6 B each, fine up to ~150 damaged slots.
+                    w.Write((ushort)buildings.Count);
+                    foreach (var (i, hp) in buildings) { w.Write(i); w.Write(hp); }
+                }
+                w.Flush();
+                int n = Mathf.Clamp((MaxStateBody - (int)w.BaseStream.Length - 2) / EnemyBytes, 0, enemies.Count - next);
+                w.Write((ushort)n);
+                for (int k = 0; k < n; k++, next++)
+                {
+                    var e = enemies[next];
+                    w.Write(e.id); w.Write(e.pos.x); w.Write(e.pos.y); w.Write(e.pos.z); w.Write(e.yaw); w.Write(e.hp);
+                }
+            }));
+        } while (next < enemies.Count);
+        return chunks;
+    }
+
+    /// Appends the body's enemies; `buildings` is null unless this is the first chunk.
+    internal static void DecodeState(byte[] data, out int epoch, out string scene, List<(ushort id, Vector3 pos, byte yaw, float hp)> enemies, out List<(ushort index, float hp)> buildings)
+    {
+        using var r = new BinaryReader(new MemoryStream(data));
+        r.ReadByte();
+        epoch = r.ReadInt32();
+        scene = r.ReadString();
+        buildings = null;
+        if (r.ReadBoolean())
+        {
+            buildings = new List<(ushort, float)>();
+            int b = r.ReadUInt16();
+            for (int i = 0; i < b; i++) buildings.Add((r.ReadUInt16(), r.ReadSingle()));
+        }
+        int n = r.ReadUInt16();
+        for (int i = 0; i < n; i++)
+            enemies.Add((r.ReadUInt16(), new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()), r.ReadByte(), r.ReadSingle()));
+    }
+
+    /// 300 enemies + 40 damaged buildings: every chunk fits the MTU budget and round-trips.
+    internal static bool SelfCheck()
+    {
+        var en = Enumerable.Range(1, 300).Select(i => ((ushort)i, new Vector3(i, 0.5f, -i), (byte)i, i * 1.5f)).ToList();
+        var bl = Enumerable.Range(0, 40).Select(i => ((ushort)i, i * 2f)).ToList();
+        var chunks = EncodeState(42, "Nordfels", en, bl);
+        var got = new List<(ushort id, Vector3 pos, byte yaw, float hp)>();
+        int withBuildings = 0;
+        foreach (var c in chunks)
+        {
+            if (c.Length > MaxStateBody) return false;
+            DecodeState(c, out var ep, out var sc, got, out var b);
+            if (ep != 42 || sc != "Nordfels") return false;
+            if (b != null) { withBuildings++; if (!b.SequenceEqual(bl)) return false; }
+        }
+        var empty = EncodeState(1, "x", new(), new());
+        return chunks.Count > 1 && withBuildings == 1 && got.SequenceEqual(en) && empty.Count == 1;
+    }
+
+    /// Host: a client's player hit one of our enemies. Applied as a real hit from the avatar,
+    /// so death, coins and on-death effects happen here and replicate back.
+    void ApplyHit(BinaryReader r, int ep)
+    {
+        ushort id = r.ReadUInt16();
+        float amount = r.ReadSingle();
+        if (ep != epoch || float.IsNaN(amount) || amount <= 0f) return;
+        var entry = tracked.FirstOrDefault(kv => kv.Value.id == id);
+        var hp = entry.Value.hp;
+        if (entry.Key == null || hp == null || hp.HpValue <= 0f) return; // already dead or unknown
+        amount = Mathf.Min(amount, hp.HpValue + 1f);
+        bool died = hp.TakeDamage(amount, p.Players.ghostHp != null ? p.Players.ghostHp.TaggedObj : null, causedByPlayer: true);
+        if (++hitsApplied <= 5 || hitsApplied % 20 == 0 || died)
+            p.Log($"Enemies: applied client hit #{hitsApplied} on {id} {entry.Key.name}: {amount:0.#} dmg, hp now {hp.HpValue:0.#}{(died ? ", killed" : "")}");
     }
 
     void SendSpawn(ushort id, Info e) => link.SendMessage(Write(w =>
@@ -160,30 +235,38 @@ class EnemySync
 
     // ---------- client ----------
 
+    readonly List<(ushort id, Vector3 pos, byte yaw, float hp)> stateBuf = new();
+
     internal void OnState(byte[] data)
     {
         if (p.role != "client") return;
-        using var r = new BinaryReader(new MemoryStream(data));
-        r.ReadByte();
-        int ep = r.ReadInt32();
-        string scene = r.ReadString();
+        stateBuf.Clear();
+        DecodeState(data, out int ep, out string scene, stateBuf, out var blds);
         if (!InScene(scene) || ep != CurrentEpoch()) return;
-        int n = r.ReadUInt16();
-        for (int i = 0; i < n; i++)
+        foreach (var (id, pos, yaw, hp) in stateBuf)
         {
-            ushort id = r.ReadUInt16();
-            var pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-            float yaw = r.ReadByte() * 360f / 256f;
-            float hp = r.ReadSingle();
             if (!puppets.TryGetValue(id, out var pu) || pu.Go == null) continue;
-            pu.Pos = pos; pu.Yaw = yaw;
+            pu.Pos = pos; pu.Yaw = yaw * 360f / 256f;
             if (pu.Hp != null && hp > 0f && Mathf.Abs(pu.Hp.HpValue - hp) > 0.01f) pu.Hp.SetHpTo(hp);
         }
+        if (blds == null) return;
         hostBuildingHp.Clear();
-        int b = r.ReadUInt16();
-        for (int i = 0; i < b; i++) hostBuildingHp[r.ReadUInt16()] = r.ReadSingle();
+        foreach (var (i, hp) in blds) hostBuildingHp[i] = hp;
         buildingsFresh = true;
     }
+
+    /// Client: our player hit a puppet. The host applies it (ApplyHit); we never do.
+    internal void SendHit(Hp puppet, float amount)
+    {
+        var id = puppets.FirstOrDefault(kv => kv.Value.Hp == puppet).Key;
+        if (id == 0) return;
+        link.SendMessage(Write(w => { w.Write(MsgHit); w.Write(CurrentEpoch()); w.Write(id); w.Write(amount); }));
+        if (++hitsSent <= 5 || hitsSent % 20 == 0) p.Log($"Enemies: sent hit #{hitsSent} on {id} for {amount:0.#}");
+    }
+
+    /// Test only: the puppet closest to `pos`.
+    internal Hp NearestPuppet(Vector3 pos) => puppets.Values.Where(x => x.Go != null && x.Hp != null && x.Hp.HpValue > 0f)
+        .OrderBy(x => (x.Go.transform.position - pos).sqrMagnitude).Select(x => x.Hp).FirstOrDefault();
 
     int CurrentEpoch() => known.Count > 0 ? known.Values.First().Epoch : 0;
 
@@ -316,10 +399,11 @@ class EnemySync
 
     internal void OnMessage(byte[] data)
     {
-        if (p.role != "client") return;
         using var r = new BinaryReader(new MemoryStream(data));
         byte kind = r.ReadByte();
         int ep = r.ReadInt32();
+        if (p.role == "host") { if (kind == MsgHit) ApplyHit(r, ep); return; }
+        if (p.role != "client") return;
         if (kind == MsgSpawn)
         {
             ushort id = r.ReadUInt16();
@@ -347,8 +431,8 @@ class EnemySync
 
     /// Test status line.
     internal string Status() => p.role == "host"
-        ? $"tracked={tracked.Count} nextId={nextId}"
-        : $"known={known.Count} puppets={puppets.Values.Count(x => x.Go != null)} missing={puppets.Values.Count(x => x.Go == null)}";
+        ? $"tracked={tracked.Count} nextId={nextId} hitsApplied={hitsApplied}"
+        : $"known={known.Count} puppets={puppets.Values.Count(x => x.Go != null)} missing={puppets.Values.Count(x => x.Go == null)} hitsSent={hitsSent}";
 
     static byte[] Write(System.Action<BinaryWriter> body)
     {

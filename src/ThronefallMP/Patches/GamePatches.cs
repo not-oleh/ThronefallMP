@@ -54,10 +54,19 @@ static class DamagePatch
             return false;
         }
 
-        // Client: host enemies are puppets; only the host's kill (EnemySync) may hurt them.
-        if (p.Enemies.IsPuppet(__instance)) return p.Enemies.applying;
-
+        // Client: host enemies are puppets; only the host's kill (EnemySync) may hurt them. Our
+        // player's hits go to the host; our towers/units are mirrored there, so theirs are dropped.
         var me = PlayerMovement.instance;
+        if (p.Enemies.IsPuppet(__instance))
+        {
+            if (p.Enemies.applying) return true;
+            // shortcut: sourceless player effects (explosions, burns, Blood Wand bonus) are not
+            // forwarded; tag them by attacker if players miss that damage.
+            if (!__instance.KnockedOut && me != null && me.Hp != null && _damageComingFrom != null && _damageComingFrom == me.Hp.TaggedObj)
+                p.Enemies.SendHit(__instance, _amount);
+            return false;
+        }
+
         if (p.role == "client" && me != null && __instance == me.Hp)
         {
             if (!players.applyingHostDamage) return false;

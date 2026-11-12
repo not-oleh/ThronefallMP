@@ -24,7 +24,7 @@ namespace ThronefallMP;
 ///                            the avatar on the nearest enemy; client: build one slot (dev/CI)
 ///   --mp-test-coins          both: change the treasury once the avatar appears (dev/CI)
 ///   --mp-shot file.png       save a screenshot once the avatar appears (dev/CI)
-[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.6.0")]
+[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.7.0")]
 public class Plugin : BaseUnityPlugin
 {
     const int DefaultPort = 27015;
@@ -55,7 +55,7 @@ public class Plugin : BaseUnityPlugin
     {
         Instance = this;
         Players = new PlayerSync(this);
-        if (!PlayerSync.SelfCheck() || !Reliable.SelfCheck()) Logger.LogError("Self-check failed (packet round-trip or reliable layer)");
+        if (!PlayerSync.SelfCheck() || !Reliable.SelfCheck() || !EnemySync.SelfCheck()) Logger.LogError("Self-check failed (packet round-trip, reliable layer or enemy chunks)");
 
         var args = Environment.GetCommandLineArgs();
         string After(string flag)
@@ -152,7 +152,7 @@ public class Plugin : BaseUnityPlugin
             nextSend = Time.unscaledTime + SendInterval;
             link.SendState(new byte[] { 0 }.Concat(Players.Snapshot(me)).ToArray());
             var enemies = Enemies.HostSnapshot(me);
-            if (enemies != null) link.SendState(enemies);
+            if (enemies != null) foreach (var chunk in enemies) link.SendState(chunk);
         }
 
         Match.Tick(me);
@@ -251,6 +251,21 @@ public class Plugin : BaseUnityPlugin
             .OrderBy(s => BuildSync.SlotId(s), StringComparer.Ordinal).FirstOrDefault();
         Logger.LogInfo($"Test build: client builds {(slot != null ? slot.buildingName + " " + BuildSync.SlotId(slot) : "nothing (no free slot)")}");
         slot?.TryToBuildOrUpgradeAndPay(PlayerInteraction.instance, false);
+        InvokeRepeating(nameof(TestClientAttack), 5f, 0.5f);
+    }
+
+    /// Client test: at night, stand next to the nearest puppet and swing the equipped weapon
+    /// through the game's own attack (the hit must reach the host as an intent).
+    void TestClientAttack()
+    {
+        var me = PlayerMovement.instance;
+        if (me == null || me.Hp == null || me.Hp.KnockedOut || DayNightCycle.Instance?.CurrentTimestate != DayNightCycle.Timestate.Night) return;
+        var target = Enemies.NearestPuppet(me.transform.position);
+        if (target == null) return;
+        var pos = target.transform.position;
+        if ((me.transform.position - pos).sqrMagnitude > 4f) me.TeleportTo(pos + Vector3.right * 1.5f);
+        foreach (var a in me.GetComponentsInChildren<ManualAttack>())
+            if (a.isActiveAndEnabled) a.TryToAttack();
     }
 
     void TestNightStart()

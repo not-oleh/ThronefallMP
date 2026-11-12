@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-12 (night) · plugin version 0.6.0 · protocol 6 · MIT licensed
+Last updated: 2026-11-13 · plugin version 0.7.0 · protocol 7 · MIT licensed
 
 ## Working now
 
@@ -17,7 +17,8 @@ Last updated: 2026-11-12 (night) · plugin version 0.6.0 · protocol 6 · MIT li
   (`--mp-test-coins`: 8 + 10 + 5 → both read 23).
 - Shared buildings + upgrade choices (`Sync/BuildSync.cs`): sync point
   `BuildSlot.OnUpgradeChoiceComplete`; slot id = `SaveLoadEntity.GUID`; host log resent on
-  reconnect, client requests, idempotent by level. Tested both directions with `--mp-test-night`.
+  reconnect, client requests, idempotent by level. Tested both directions with `--mp-test-night`;
+  real UI (hold-to-fill, choice cards) user-verified in a 2-window run (2026-11-13).
 - Host-authoritative enemies (`Sync/EnemySync.cs`, M3 slice 1): client's `Spawn.Update` skipped
   while the host is in its scene. Host ids every `TagManager.EnemyUnits` entry (per-match epoch),
   spawn/despawn reliable; pos/yaw/hp of enemies + hp of damaged buildings (index = sorted
@@ -25,7 +26,20 @@ Last updated: 2026-11-12 (night) · plugin version 0.6.0 · protocol 6 · MIT li
   puppets from the same prefab (`Resources.FindObjectsOfTypeAll`), stripped to Hp/TaggedObject/
   SimpleWalk/Healthbar + UI; puppets take no local damage; host kill → game death (coins and
   on-death spawns removed). Test 2026-11-12 (`--mp-test-night`, 3 runs): wave 1 = 3 `E Melee`
-  sent/got/built/killed, a building knockout followed, 0 exceptions in both logs.
+  sent/got/built/killed, a building knockout followed, 0 exceptions in both logs. Puppet visuals
+  (walk bounce, health bars, death animation) user-verified (2026-11-13).
+- Client attacks (M3 slice 2): `DamagePatch` sends a reliable `MsgHit` (epoch, enemy id, amount)
+  when a puppet is hit with the local player as source (`Weapon` passes the attacker through
+  projectiles); client towers/units are dropped (the host simulates its own copies). Host checks
+  epoch/id/alive, clamps the amount, applies `TakeDamage` from the avatar; hp and kill replicate
+  back. Test 2026-11-13 (`--mp-test-night`, client `Light Spear`, `TestClientAttack` swings via
+  `ManualAttack.TryToAttack` next to the nearest puppet): 9 hits applied, enemy 1 killed on the
+  host, client played the kill, 0 exceptions in both logs.
+- Enemy state split into MTU-safe chunks (`EncodeState`, body ≤ 1150 B, buildings in chunk 0
+  only); `EnemySync.SelfCheck` encodes 300 enemies + 40 buildings and round-trips them.
+- Knockout/revive: each player is knocked out and revived only in its own world (`AutoRevive`,
+  dawn via synced day/night); `State.Dead` hides the avatar so enemies stop targeting it. The game
+  has no player-revives-player mechanic. Local transitions logged ("Local player knocked out/revived").
 - Overlay crisp on Retina (user-verified). `scripts/setup.sh` runs end to end (outside sandbox).
 
 ## Milestones
@@ -33,38 +47,37 @@ Last updated: 2026-11-12 (night) · plugin version 0.6.0 · protocol 6 · MIT li
 - [x] M0 Toolchain, repo, UDP ghost
 - [x] M1 Second player in the world
 - [x] M2 Shared match state (day/night, coins/cores, buildings, upgrade choices)
-- [~] M3 Combat — slice 1 done: enemy replication + building hp. Left: client attacks, revive
+- [x] M3 Combat — enemy replication, building hp, client hits via host, MTU-safe enemy state
 - [ ] M4 Steam lobbies/invites, reconnect, Craaghelm bosses, Eternal Trials
 - [ ] QoL track (nothing requested yet)
 
 ## Not verified
 
-- **Real-UI build sync (hold-to-fill, choice cards): the user has not tested it yet** (2026-11-12).
+- **Knockout/revive transitions were not hit in the 2026-11-13 run** (client hp stayed ≥ 45);
+  logic unchanged from M1, only logging added. Multi-chunk state only exercised by `SelfCheck`.
+- Sourceless player damage (explosions, burns, Blood Wand bonus, `isPlayerWeapon` effects without
+  attacker) is not forwarded; Potion Vials etc. may do little to puppets. Only Light Spear tested.
 - Window-focus block (needs two machines). Energy cores (no DLC on this account; no null refs).
 - Boosts (`ApplyBoost`) and mid-match save loads (`ApplyLoadedUpgradesDelayed`) bypass build sync.
 - Same slot upgraded by both players at once: host rejects the second; client may have paid twice.
 - Enemies beyond Nordfels wave 1: flying/large/boss, scene-placed, elite material, facing (root
-  yaw synced; a child may be what turns), big waves (~20 B/enemy: >60 enemies exceeds a 1.2 KB
-  MTU; fine on loopback). One early run built only 1 of 3 puppets (before spawn logging); not
-  reproduced in 2 later runs.
-- Client hits/towers on puppets do nothing (blocked); host soldiers/projectiles not shown on the
-  client; coins from host kills exist only in the host world. Nothing seen by a human yet.
+  yaw synced; a child may be what turns). One early run built only 1 of 3 puppets; not reproduced.
+- Host soldiers/projectiles not shown on the client; coins from host kills exist only in the host
+  world. Client hit feedback (hp bar) lags one round trip.
 - Remote attack animation, non-weapon host perks, human-driven movement, second machine.
 
 ## Next tasks
 
 Simple (Sonnet-friendly):
 
-- [ ] Human test of build sync through the real UI (fill a slot on the client, pick a castle branch).
-- [ ] Human look at client puppets at night (walk bounce, health bars, facing, death VFX).
 - [ ] `--mp-shot` at night to eyeball the overlay size on Retina.
+- [ ] Human test: client fights with several weapons (bow, potion vials, blowpipe) in a 2-window run.
+- [ ] Get the client knocked out in a run and check both logs for knockout → avatar hidden → revive.
 
 Complex (architecture-heavy, use Opus/Fable):
 
-- [ ] M3 slice 2: client hits on puppets → intent (enemy id, amount) → host applies damage
-      (`DamagePatch` already intercepts them via `Enemies.IsPuppet`).
+- [ ] Forward sourceless player damage (explosions/burns) — needs attacker tagging per effect.
 - [ ] Longer test: several waves, flying/boss enemies, mid-night client join (`ResendAll`).
-- [ ] Quantize/split the enemy state packet before the Steam transport.
 - [ ] Steam P2P transport behind `Link` (same `SendState/SendMessage/Pump/Peer` surface).
 
 ## Known quirks and dead ends

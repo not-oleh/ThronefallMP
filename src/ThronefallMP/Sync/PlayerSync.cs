@@ -34,6 +34,7 @@ class PlayerSync
     internal Hp ghostHp;
     readonly List<(string name, GameObject root, GameObject visuals, List<OneShotAnimationBase> anims)> ghostWeapons = new();
     byte seenAttacks;
+    bool localDead;
 
     // Host: total damage its enemies dealt to the avatar. Client: how much of that it has taken.
     internal float damageToPeer;
@@ -55,6 +56,11 @@ class PlayerSync
     internal void Tick(PlayerMovement me, bool rebase)
     {
         if (rebase) damageTaken = Remote.DamageToPeer;
+        // Each player is knocked out and revived (AutoRevive, dawn) only in its own world; the
+        // peer sees it through State.Dead, which hides the avatar. Logged to verify both sides.
+        bool dead = me != null && me.Hp != null && me.Hp.KnockedOut;
+        if (me != null && dead != localDead) p.Log(dead ? "Local player knocked out" : $"Local player revived (hp {me.Hp.HpValue:0.#})");
+        localDead = dead;
         TakeHostDamage(me);
         FlushDamageBurst();
     }

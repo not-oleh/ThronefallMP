@@ -14,7 +14,7 @@ namespace ThronefallMP;
 /// SendState / SendMessage / Pump / Peer.
 class Link
 {
-    public const byte Protocol = 6;
+    public const byte Protocol = 7;
     const byte KState = 0, KMessage = 1, KAck = 2;
 
     readonly UdpClient udp;
