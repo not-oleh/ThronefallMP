@@ -26,9 +26,9 @@ matters is decided by the host.
 
 ```
 Plugin (bootstrap, command line, overlay)
- ├─ Net        transport behind one small interface: send/receive bytes, reliable or not
- │              · today: raw UDP, one peer
- │              · next:  LiteNetLib (LAN / direct IP), then Steam P2P for invites
+ ├─ Net        Link (framing, session ids, reliable stream) over ITransport (raw datagrams)
+ │              · UdpTransport: local/LAN/port-forwarded (--mp-host / --mp-join)
+ │              · SteamTransport: Steam P2P + friends-only lobby (--mp-steam-host / -join)
  ├─ Sync       one module per game system, each owning its messages
  │              players · scene flow · day/night · economy · buildings · enemies · choices
  ├─ Patches    thin Harmony patches, one file per game class, that call into Sync
@@ -41,8 +41,27 @@ Rules that keep it maintainable:
 - Every message carries a protocol version; host and client refuse to pair on mismatch.
 - The mod is inert in single player unless a QoL toggle is on. No save-format changes.
 
-The split is done: `Net/` (`Link` UDP transport, `Reliable` ack/resend), `Sync/` (`PlayerSync`,
-`MatchSync`), `Patches/`, and a thin `Plugin.cs` (flags, update loop, scene following, overlay).
+The split is done: `Net/` (`Link` + `Reliable` over `ITransport`), `Sync/` (`PlayerSync`,
+`MatchSync`, `BuildSync`, `EnemySync`), `Patches/`, and a thin `Plugin.cs` (flags, update loop,
+scene following, overlay).
+
+**Transport.** `ITransport` moves unreliable datagrams to one peer (`Send`, `TryReceive`,
+`HasPeer`); `Link` adds everything else, so both transports behave identically.
+`SteamTransport` uses the game's own Steamworks.NET (initialised and pumped by `SteamManager`;
+the transport waits for it): the host creates a friends-only lobby with data
+`thronefallmp=<protocol>`, the client joins by id (`--mp-steam-join <id>`), by a Steam invite
+(`GameLobbyJoinRequested_t`), or by Steam's `+connect_lobby <id>` launch argument; its peer is the
+lobby owner. The host accepts P2P sessions only from lobby members. Host receives on channel 0,
+client on channel 1, so one Steam account can run both ends on one Mac.
+
+**Player damage attribution (client).** Hits on puppets are forwarded to the host only if they
+are the local player's. Direct hits name the player as attacker. Indirect ones (explosions,
+puddles, traps, curse blasts, Blood Wand bonus) pass no attacker, so `PlayerDamageScope` is
+opened around the player's own code: every `ManualAttack` subclass's `Attack`/`Update`/coroutines,
+`Weapon.DealDamage` with the player as attacker, `Update` of projectiles `firedBy` the player, and
+`Update`/`OnTriggerEnter` of pooled AoE objects (`HealAndDamageArea`, `PuddleDamageDealer`,
+`AttackByTimeOrCollision`) that were enabled inside a scope. Sourceless damage outside a scope
+(our towers/units) is dropped; the host simulates its own copies.
 
 ## Local testing on one Mac
 
@@ -51,6 +70,9 @@ The split is done: `Net/` (`Link` UDP transport, `Reliable` ack/resend), `Sync/`
 - `SteamAppId=2239150` in the environment lets a copy outside the Steam library start.
 - `Application.runInBackground` keeps the unfocused window simulating.
 - `--mp-profile client` redirects the client's saves to `mp-client/`.
+- Steam: launch the game directly with `--mp-steam-host`, read the lobby id from the log, start
+  the second instance with `--mp-steam-join <id> --mp-profile client` (`run.sh host/client` add the
+  UDP flags, which win).
 - `--mp-autostart` and `--mp-shot` allow unattended smoke tests: launch, wait, check the logs
   for `Peer connected`, `Following host to …` and `Avatar targetable`.
 
@@ -60,9 +82,9 @@ The split is done: `Net/` (`Link` UDP transport, `Reliable` ack/resend), `Sync/`
 |---|---|---|
 | **M0 — Toolchain** ✅ | BepInEx on arm64, decompile, repo, launcher, UDP ghost | Two local instances show each other's ghost |
 | **M1 — Second player in the world** 🟡 (0.3.0) | Done: client follows host scene changes and the host's perks while keeping its own weapon; remote player is an avatar cloned from the local player (own weapon model, walk/sprint/attack animation), registered with `TagManager` so enemies target it; the host forwards damage dealt to the avatar and the client's player takes it; the avatar hides while the peer is dead; only the focused window reads input. Open: remote attack animation, perk copy and human-driven movement not yet observed in a test; second machine untested | Both players walk into a level together and enemies target either |
-| **M2 — Shared match state** | Day/night, coins and energy cores, build slots and upgrades, upgrade choices, win/lose | A full level can be played to the end with building and economy in sync |
-| **M3 — Combat** | Enemy spawn/position/health replication, player attacks and damage, unit commands, revive | Nights look the same on both screens |
-| **M4 — Release quality** | Steam lobbies and invites, reconnect, version handshake UI, Craaghelm bosses, Eternal Trials | A friend can join via Steam overlay |
+| **M2 — Shared match state** ✅ | Day/night, coins and energy cores, build slots and upgrades, upgrade choices, win/lose (host's end state pushed, M3 close-out) | A full level can be played to the end with building and economy in sync |
+| **M3 — Combat** ✅ | Enemy spawn/position/health replication, player attacks and damage, unit commands, revive | Nights look the same on both screens |
+| **M4 — Release quality** 🟡 (slice 1: Steam P2P + lobby) | Steam lobbies and invites, reconnect, version handshake UI, Craaghelm bosses, Eternal Trials | A friend can join via Steam overlay |
 | **QoL track** (parallel) | Small independent toggles, added on request | Each ships on its own |
 
 Decisions taken in M1:
@@ -70,9 +92,8 @@ Decisions taken in M1:
 - **The remote player is not a `PlayerMovement`.** It is a stripped clone carrying only visuals,
   colliders, `TaggedObject` and `Hp`. That sidesteps the ~100 single-player call sites instead of
   rewriting them; they only matter again if the host must run a second *controllable* player.
-- **No LiteNetLib yet.** Everything synced so far is state that is resent 20 times a second, so
-  loss is self-healing. A reliable transport arrives with the first one-off event (M2: build,
-  pick an upgrade).
+- **No LiteNetLib.** `Net/Reliable.cs` (seq/ack/resend) covers one-off events; state is resent
+  20 times a second, so loss is self-healing.
 
 Biggest risks: clients currently run their own simulation, so M2/M3 must switch the client to
 rendering host state; and bandwidth for enemy replication on late waves (M3).

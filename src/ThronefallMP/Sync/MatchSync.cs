@@ -10,11 +10,12 @@ namespace ThronefallMP;
 ///  - Treasury (coins + Craaghelm energy cores): the host's balance is the truth and is pushed
 ///    on every change. The client forwards its own gains and spends as deltas, so both players'
 ///    actions land in the one balance.
-/// Both are level-based ("latest wins"), so a message that arrives before the client is in the
+///  - Match end: the host's victory/defeat is pushed once; the client ends the same match.
+/// All are level-based ("latest wins"), so a message that arrives before the client is in the
 /// right scene is kept and applied once it is.
 class MatchSync
 {
-    const byte MsgTime = 1, MsgBalance = 2, MsgDelta = 3;
+    const byte MsgTime = 1, MsgBalance = 2, MsgDelta = 3, MsgEnd = 4;
     static readonly AccessTools.FieldRef<PlayerInteraction, int> BalanceField =
         AccessTools.FieldRefAccess<PlayerInteraction, int>("balance");
     static readonly AccessTools.FieldRef<PlayerInteraction, int> CoresField =
@@ -24,11 +25,12 @@ class MatchSync
     readonly Link link;
 
     // Host: what the peer was last told.
-    string sentTimeScene, sentBalanceScene;
+    string sentTimeScene, sentBalanceScene, sentEndScene;
     int sentTime = -1, sentCoins, sentCores;
 
     // Client: latest host state, applied when scene and match allow.
-    string timeScene, balanceScene;
+    string timeScene, balanceScene, endScene;
+    int hostEnd;
     int hostTime = -1, hostCoins, hostCores;
     bool balanceFresh;
     PlayerInteraction balanceAppliedTo;
@@ -45,7 +47,7 @@ class MatchSync
         link.PeerRestarted += ResendAll;
     }
 
-    internal void ResendAll() { sentTimeScene = sentBalanceScene = null; }
+    internal void ResendAll() { sentTimeScene = sentBalanceScene = sentEndScene = null; }
 
     /// Client only: while the host is in our scene, our own day/night cycle must not advance.
     internal bool FrozenByHost(string scene) => p.role == "client" && p.PeerAlive && p.Players.Remote.Scene == scene;
@@ -77,6 +79,15 @@ class MatchSync
             p.Log($"Match: time {cycle.CurrentTimestate} in {scene} sent to peer");
         }
 
+        var gs = LocalGamestate.Instance;
+        if (gs != null && !IsEnd(gs.CurrentState)) sentEndScene = null; // a new match
+        if (gs != null && IsEnd(gs.CurrentState) && scene != sentEndScene)
+        {
+            sentEndScene = scene;
+            link.SendMessage(Write(w => { w.Write(MsgEnd); w.Write(scene); w.Write((byte)gs.CurrentState); }));
+            p.Log($"Match: end {gs.CurrentState} in {scene} sent to peer");
+        }
+
         var pi = PlayerInteraction.instance;
         if (pi != null && (scene != sentBalanceScene || pi.Balance != sentCoins || pi.EnergyCoreBalance != sentCores))
         {
@@ -99,8 +110,17 @@ class MatchSync
         }
 
         string scene = me.gameObject.scene.name;
+        if (endScene != null && p.Players.Remote.Scene != endScene) endScene = null; // host moved on
         var gs = LocalGamestate.Instance;
         if (gs == null || gs.CurrentState != LocalGamestate.State.InMatch) return;
+
+        if (endScene == scene)
+        {
+            p.Log($"Match: end follows host -> {(LocalGamestate.State)hostEnd}");
+            endScene = null;
+            gs.SetState((LocalGamestate.State)hostEnd);
+            return;
+        }
 
         var cycle = DayNightCycle.Instance;
         if (cycle != null && hostTime >= 0 && timeScene == scene && (int)cycle.CurrentTimestate != hostTime)
@@ -138,11 +158,19 @@ class MatchSync
                 hostCores = r.ReadInt32();
                 balanceFresh = true;
                 break;
+            case MsgEnd when p.role == "client":
+                endScene = r.ReadString();
+                hostEnd = r.ReadByte();
+                if (!IsEnd((LocalGamestate.State)hostEnd)) endScene = null;
+                break;
             case MsgDelta when p.role == "host":
                 ApplyDelta(r.ReadInt32(), r.ReadInt32());
                 break;
         }
     }
+
+    static bool IsEnd(LocalGamestate.State s) =>
+        s == LocalGamestate.State.AfterMatchVictory || s == LocalGamestate.State.AfterMatchDefeat;
 
     void ApplyDelta(int coins, int cores)
     {

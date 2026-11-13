@@ -60,15 +60,17 @@ static class DamagePatch
         if (p.Enemies.IsPuppet(__instance))
         {
             if (p.Enemies.applying) return true;
-            // shortcut: sourceless player effects (explosions, burns, Blood Wand bonus) are not
-            // forwarded; tag them by attacker if players miss that damage.
-            if (!__instance.KnockedOut && me != null && me.Hp != null && _damageComingFrom != null && _damageComingFrom == me.Hp.TaggedObj)
-                p.Enemies.SendHit(__instance, _amount);
+            // Ours: named as attacker, or sourceless inside our weapon's code (PlayerDamageScope).
+            bool direct = PlayerDamageScope.IsLocalPlayer(_damageComingFrom);
+            bool indirect = _damageComingFrom == null && PlayerDamageScope.Active;
+            if (!__instance.KnockedOut && (direct || indirect)) p.Enemies.SendHit(__instance, _amount, !direct);
             return false;
         }
 
         if (p.role == "client" && me != null && __instance == me.Hp)
         {
+            // Self-inflicted weapon costs (Blood Wand) stay local; other local damage is the host's.
+            if (PlayerDamageScope.Active && !players.applyingHostDamage) return true;
             if (!players.applyingHostDamage) return false;
             players.NoteHostDamage(_amount);
         }

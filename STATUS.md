@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-13 · plugin version 0.7.0 · protocol 7 · MIT licensed
+Last updated: 2026-11-13 · plugin version 0.8.0 · protocol 8 · MIT licensed
 
 ## Working now
 
@@ -15,31 +15,31 @@ Last updated: 2026-11-13 · plugin version 0.7.0 · protocol 7 · MIT licensed
   to the host's state.
 - Shared treasury: host balance pushed on change; client forwards coin/core deltas
   (`--mp-test-coins`: 8 + 10 + 5 → both read 23).
-- Shared buildings + upgrade choices (`Sync/BuildSync.cs`): sync point
-  `BuildSlot.OnUpgradeChoiceComplete`; slot id = `SaveLoadEntity.GUID`; host log resent on
-  reconnect, client requests, idempotent by level. Tested both directions with `--mp-test-night`;
-  real UI (hold-to-fill, choice cards) user-verified in a 2-window run (2026-11-13).
-- Host-authoritative enemies (`Sync/EnemySync.cs`, M3 slice 1): client's `Spawn.Update` skipped
-  while the host is in its scene. Host ids every `TagManager.EnemyUnits` entry (per-match epoch),
-  spawn/despawn reliable; pos/yaw/hp of enemies + hp of damaged buildings (index = sorted
-  `SlotId`) in a second 20 Hz state packet (state bodies start with a kind byte). Client builds
-  puppets from the same prefab (`Resources.FindObjectsOfTypeAll`), stripped to Hp/TaggedObject/
-  SimpleWalk/Healthbar + UI; puppets take no local damage; host kill → game death (coins and
-  on-death spawns removed). Test 2026-11-12 (`--mp-test-night`, 3 runs): wave 1 = 3 `E Melee`
-  sent/got/built/killed, a building knockout followed, 0 exceptions in both logs. Puppet visuals
-  (walk bounce, health bars, death animation) user-verified (2026-11-13).
-- Client attacks (M3 slice 2): `DamagePatch` sends a reliable `MsgHit` (epoch, enemy id, amount)
-  when a puppet is hit with the local player as source (`Weapon` passes the attacker through
-  projectiles); client towers/units are dropped (the host simulates its own copies). Host checks
-  epoch/id/alive, clamps the amount, applies `TakeDamage` from the avatar; hp and kill replicate
-  back. Test 2026-11-13 (`--mp-test-night`, client `Light Spear`, `TestClientAttack` swings via
-  `ManualAttack.TryToAttack` next to the nearest puppet): 9 hits applied, enemy 1 killed on the
-  host, client played the kill, 0 exceptions in both logs.
-- Enemy state split into MTU-safe chunks (`EncodeState`, body ≤ 1150 B, buildings in chunk 0
-  only); `EnemySync.SelfCheck` encodes 300 enemies + 40 buildings and round-trips them.
+- Shared buildings + upgrade choices (`Sync/BuildSync.cs`, hooked at
+  `BuildSlot.OnUpgradeChoiceComplete`, slot id = `SaveLoadEntity.GUID`, idempotent by level);
+  real UI user-verified in a 2-window run.
+- Host-authoritative enemies (`Sync/EnemySync.cs`): client waves off; host ids enemies (per-match
+  epoch), spawn/despawn reliable, pos/yaw/hp + building hp in MTU-safe 20 Hz chunks (`SelfCheck`
+  round-trips 300 enemies + 40 buildings). Client puppets are stripped prefab clones; host kill →
+  game death. Puppet visuals user-verified.
+- Client attacks: puppet hits by the local player → reliable `MsgHit` → host checks epoch/id/alive,
+  clamps, applies from the avatar; hp/kill replicate back.
 - Knockout/revive: each player is knocked out and revived only in its own world (`AutoRevive`,
   dawn via synced day/night); `State.Dead` hides the avatar so enemies stop targeting it. The game
-  has no player-revives-player mechanic. Local transitions logged ("Local player knocked out/revived").
+  has no player-revives-player mechanic. Verified 2026-11-13: client knocked out → host "Avatar
+  hidden (peer is dead)" → client revived → avatar shown, twice per 3-night run.
+- Indirect player damage (`Patches/PlayerDamagePatches.cs`, `PlayerDamageScope`): sourceless hits
+  on puppets inside the local player's attack code / projectiles / AoE objects are forwarded
+  (logged "(indirect)"); towers/units still dropped. Verified: Cursed Blowpipe curse blasts and
+  Blood Wand bonus hits forwarded and applied (526/560 applied, rest hit dead enemies). Potion
+  Vials damage turned out to be direct (projectile + splash with attacker). Blood Wand's
+  self-damage now applies on the client (was blocked).
+- Match end (`MatchSync` `MsgEnd`): host's Victory/Defeat pushed once per match; client calls
+  `SetState` with the same state. Verified with a forced host defeat ("end follows host").
+- `--mp-test-night`: host runs 3 nights then resigns; client drops to 20% hp at its first night.
+- Transport split (M4 slice 1): `Net/ITransport` + `UdpTransport` (unchanged behaviour) +
+  `SteamTransport` (SteamNetworking P2P, friends-only lobby, join by id / invite /
+  `+connect_lobby`). Full 3-night test passed over Steam P2P on one Mac with one account.
 - Overlay crisp on Retina (user-verified). `scripts/setup.sh` runs end to end (outside sandbox).
 
 ## Milestones
@@ -47,16 +47,20 @@ Last updated: 2026-11-13 · plugin version 0.7.0 · protocol 7 · MIT licensed
 - [x] M0 Toolchain, repo, UDP ghost
 - [x] M1 Second player in the world
 - [x] M2 Shared match state (day/night, coins/cores, buildings, upgrade choices)
-- [x] M3 Combat — enemy replication, building hp, client hits via host, MTU-safe enemy state
-- [ ] M4 Steam lobbies/invites, reconnect, Craaghelm bosses, Eternal Trials
+- [x] M3 Combat — enemy replication, building hp, client hits (direct + indirect), match end
+- [ ] M4 slice 1 done (Steam P2P + lobby); open: invites in practice, reconnect, lobby UI,
+      Craaghelm bosses, Eternal Trials
 - [ ] QoL track (nothing requested yet)
 
 ## Not verified
 
-- **Knockout/revive transitions were not hit in the 2026-11-13 run** (client hp stayed ≥ 45);
-  logic unchanged from M1, only logging added. Multi-chunk state only exercised by `SelfCheck`.
-- Sourceless player damage (explosions, burns, Blood Wand bonus, `isPlayerWeapon` effects without
-  attacker) is not forwarded; Potion Vials etc. may do little to puppets. Only Light Spear tested.
+- **Steam between two accounts / two machines** (only same-account loopback tested). Steam
+  overlay invites and `+connect_lobby` launches untested; host never notices a lobby member leaving
+  (relies on peer timeout). Multi-chunk state only exercised by `SelfCheck`.
+- Indirect damage: Falchion trap (`AttackByTimeOrCollision`) and pooled puddles not observed in a
+  run; `PlayerBallMovement`/`RidingDamager` damage not scoped. Bow, Wand, Axe, Sword untested.
+- Match end: only host defeat tested, not victory; client resign ends only the client (it then
+  follows the host back in). Restarting the same level is not followed by the client.
 - Window-focus block (needs two machines). Energy cores (no DLC on this account; no null refs).
 - Boosts (`ApplyBoost`) and mid-match save loads (`ApplyLoadedUpgradesDelayed`) bypass build sync.
 - Same slot upgraded by both players at once: host rejects the second; client may have paid twice.
@@ -71,14 +75,15 @@ Last updated: 2026-11-13 · plugin version 0.7.0 · protocol 7 · MIT licensed
 Simple (Sonnet-friendly):
 
 - [ ] `--mp-shot` at night to eyeball the overlay size on Retina.
-- [ ] Human test: client fights with several weapons (bow, potion vials, blowpipe) in a 2-window run.
-- [ ] Get the client knocked out in a run and check both logs for knockout → avatar hidden → revive.
+- [ ] `--mp-test-night` with Falchion and Trap; check "(indirect)" hits from the trap.
+- [ ] Human test: two friends on two Macs, `--mp-steam-host` + Steam invite.
 
 Complex (architecture-heavy, use Opus/Fable):
 
-- [ ] Forward sourceless player damage (explosions/burns) — needs attacker tagging per effect.
-- [ ] Longer test: several waves, flying/boss enemies, mid-night client join (`ResendAll`).
-- [ ] Steam P2P transport behind `Link` (same `SendState/SendMessage/Pump/Peer` surface).
+- [ ] Lobby UI: host/join from the title screen instead of flags; join an invite while running
+      without `--mp-steam-join` (needs a transport that can start after launch).
+- [ ] Later waves: flying/boss enemies, mid-night client join (`ResendAll`).
+- [ ] Reconnect: lobby member left → drop peer; client rejoins the same lobby.
 
 ## Known quirks and dead ends
 
@@ -109,4 +114,9 @@ Complex (architecture-heavy, use Opus/Fable):
 - **"Peer connected" is often logged twice**: scene loads stall past the 3 s timeout. Harmless.
 - **`.Reverse()` on an array resolves to the span overload**; use `Enumerable.Reverse(...)`.
 - **Fresh save has nothing equipped**; use `--mp-equip`. `--mp-autostart` skips the tutorial.
+- **Same Steam account on one Mac shares one SteamID**: both instances read the same P2P
+  channel. `SteamTransport` uses channel 0 for host-bound, 1 for client-bound packets.
+- **`run.sh host/client` always add `--mp-host/--mp-join`** (UDP wins); launch Steam tests via
+  `run_bepinex.sh` directly. Wait for "lobby <id> open" in the host log before starting the client.
+- **Potion Vials is not an AoE-without-attacker weapon**; use Blowpipe/Blood Wand to test indirect hits.
 - **`echo =====` fails in zsh** (`=word` expansion); use `echo -----` in test one-liners.

@@ -14,6 +14,7 @@
     <Reference Include="$(GameDir)/BepInEx/core/0Harmony.dll" Private="false" />
     <Reference Include="$(Managed)/Assembly-CSharp.dll" Private="false" />
     <Reference Include="$(Managed)/Rewired_Core.dll" Private="false" />
+    <Reference Include="$(Managed)/com.rlabrecque.steamworks.net.dll" Private="false" />
     <Reference Include="$(Managed)/UnityEngine.dll" Private="false" />
     <Reference Include="$(Managed)/UnityEngine.CoreModule.dll" Private="false" />
     <Reference Include="$(Managed)/UnityEngine.IMGUIModule.dll" Private="false" />

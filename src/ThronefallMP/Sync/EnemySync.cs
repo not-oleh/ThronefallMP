@@ -44,7 +44,7 @@ class EnemySync
     readonly Dictionary<string, GameObject> prefabs = new();
     internal bool applying;
     EnemySpawner suppressedLoggedFor;
-    int built, killed, hitsSent, hitsApplied;
+    int built, killed, hitsSent, hitsApplied, scopedHitsSent;
 
     // Both: building hp, indexed by sorted slot id (identical on both instances).
     List<Hp> buildings;
@@ -256,12 +256,14 @@ class EnemySync
     }
 
     /// Client: our player hit a puppet. The host applies it (ApplyHit); we never do.
-    internal void SendHit(Hp puppet, float amount)
+    /// `scoped`: sourceless damage from the local player's weapon (PlayerDamageScope).
+    internal void SendHit(Hp puppet, float amount, bool scoped)
     {
         var id = puppets.FirstOrDefault(kv => kv.Value.Hp == puppet).Key;
         if (id == 0) return;
         link.SendMessage(Write(w => { w.Write(MsgHit); w.Write(CurrentEpoch()); w.Write(id); w.Write(amount); }));
-        if (++hitsSent <= 5 || hitsSent % 20 == 0) p.Log($"Enemies: sent hit #{hitsSent} on {id} for {amount:0.#}");
+        if (scoped) scopedHitsSent++;
+        if (++hitsSent <= 5 || hitsSent % 20 == 0) p.Log($"Enemies: sent hit #{hitsSent} on {id} for {amount:0.#}{(scoped ? " (indirect)" : "")}");
     }
 
     /// Test only: the puppet closest to `pos`.
@@ -432,7 +434,7 @@ class EnemySync
     /// Test status line.
     internal string Status() => p.role == "host"
         ? $"tracked={tracked.Count} nextId={nextId} hitsApplied={hitsApplied}"
-        : $"known={known.Count} puppets={puppets.Values.Count(x => x.Go != null)} missing={puppets.Values.Count(x => x.Go == null)} hitsSent={hitsSent}";
+        : $"known={known.Count} puppets={puppets.Values.Count(x => x.Go != null)} missing={puppets.Values.Count(x => x.Go == null)} hitsSent={hitsSent} indirect={scopedHitsSent}";
 
     static byte[] Write(System.Action<BinaryWriter> body)
     {

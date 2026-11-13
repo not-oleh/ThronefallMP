@@ -10,21 +10,25 @@ using UnityEngine.SceneManagement;
 
 namespace ThronefallMP;
 
-/// Two instances talk over UDP (Net/). Each shows the other player as an avatar that enemies
+/// Two instances talk over UDP or Steam P2P (Net/). Each shows the other player as an avatar that enemies
 /// can target (Sync/PlayerSync), and the client follows the host's scene, perks, day/night and
 /// treasury (Sync/MatchSync), buildings (Sync/BuildSync) and the host's enemies (Sync/EnemySync). Everything else is still simulated per instance.
 ///
 /// Command line:
 ///   --mp-host [port]         listen (default port 27015)
 ///   --mp-join [ip[:port]]    connect (default 127.0.0.1:27015)
+///   --mp-steam-host          host over Steam P2P: opens a friends-only lobby (id in the log)
+///   --mp-steam-join [lobby]  join over Steam; without an id, wait for a Steam invite. Steam's
+///                            own +connect_lobby <id> (launch from an invite) does the same
 ///   --mp-profile name        keep saves in a separate sub-folder
 ///   --mp-autostart [scene]   skip the title screen; with a scene name, load that level
 ///   --mp-equip a,b           equip these by name before entering a level (dev/CI)
-///   --mp-test-night          host: build + upgrade the castle, start the night and park
-///                            the avatar on the nearest enemy; client: build one slot (dev/CI)
+///   --mp-test-night          host: build + upgrade the castle, run 3 nights parking the
+///                            avatar on the nearest enemy, then resign (match-end sync);
+///                            client: build one slot, drop to 20% hp at night, attack (dev/CI)
 ///   --mp-test-coins          both: change the treasury once the avatar appears (dev/CI)
 ///   --mp-shot file.png       save a screenshot once the avatar appears (dev/CI)
-[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.7.0")]
+[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.8.0")]
 public class Plugin : BaseUnityPlugin
 {
     const int DefaultPort = 27015;
@@ -41,7 +45,8 @@ public class Plugin : BaseUnityPlugin
     internal BuildSync Builds;
     internal EnemySync Enemies;
     float nextSend, lastHeard = -999f;
-    bool autostart, testNight, testChase, testCoins, shotTaken;
+    bool autostart, testNight, testChase, testCoins, shotTaken, testWeakened;
+    int testNights;
     string autostartScene, shotPath;
     string[] equipFlag;
     PlayerMovement lastMe;
@@ -75,14 +80,25 @@ public class Plugin : BaseUnityPlugin
         if (args.Contains("--mp-host"))
         {
             role = "host";
-            link = new Link(new UdpClient(int.TryParse(After("--mp-host"), out var p) ? p : DefaultPort), null, () => Time.unscaledTime);
+            link = new Link(new UdpTransport(new UdpClient(int.TryParse(After("--mp-host"), out var p) ? p : DefaultPort), null, isHost: true), () => Time.unscaledTime);
         }
         else if (args.Contains("--mp-join"))
         {
             role = "client";
             var target = (After("--mp-join") ?? "127.0.0.1").Split(':');
             var peer = new IPEndPoint(IPAddress.Parse(target[0]), target.Length > 1 ? int.Parse(target[1]) : DefaultPort);
-            link = new Link(new UdpClient(0), peer, () => Time.unscaledTime);
+            link = new Link(new UdpTransport(new UdpClient(0), peer, isHost: false), () => Time.unscaledTime);
+        }
+        else if (args.Contains("--mp-steam-host"))
+        {
+            role = "host";
+            link = new Link(new SteamTransport(true, 0, Log), () => Time.unscaledTime);
+        }
+        else if (args.Contains("--mp-steam-join") || args.Contains("+connect_lobby"))
+        {
+            role = "client";
+            ulong.TryParse(After("--mp-steam-join") ?? After("+connect_lobby"), out var lobby);
+            link = new Link(new SteamTransport(false, lobby, Log), () => Time.unscaledTime);
         }
 
         if (link != null)
@@ -98,7 +114,7 @@ public class Plugin : BaseUnityPlugin
         }
         else
         {
-            var none = new Link(null, null, () => 0f);
+            var none = new Link(null, () => 0f);
             Match = new MatchSync(this, none);
             Builds = new BuildSync(this, none);
             Enemies = new EnemySync(this, none);
@@ -132,12 +148,12 @@ public class Plugin : BaseUnityPlugin
         lastMe = me;
 
         bool wasAlive = PeerAlive;
-        if (link.Pump(role == "host", OnState, OnMessage))
+        if (link.Pump(OnState, OnMessage))
         {
             lastHeard = Time.unscaledTime;
             if (!wasAlive)
             {
-                Logger.LogInfo($"Peer connected: {link.Peer}");
+                Logger.LogInfo($"Peer connected: {link.PeerName}");
                 rebase = true;
                 Match.ResendAll();
                 Builds.ResendAll();
@@ -147,7 +163,7 @@ public class Plugin : BaseUnityPlugin
 
         Players.Tick(me, rebase);
 
-        if (link.Peer != null && Time.unscaledTime >= nextSend)
+        if (link.HasPeer && Time.unscaledTime >= nextSend)
         {
             nextSend = Time.unscaledTime + SendInterval;
             link.SendState(new byte[] { 0 }.Concat(Players.Snapshot(me)).ToArray());
@@ -260,6 +276,14 @@ public class Plugin : BaseUnityPlugin
     {
         var me = PlayerMovement.instance;
         if (me == null || me.Hp == null || me.Hp.KnockedOut || DayNightCycle.Instance?.CurrentTimestate != DayNightCycle.Timestate.Night) return;
+        if (!testWeakened)
+        {
+            // Regeneration outpaces wave-1 damage; start low so forwarded hits reach a knockout.
+            testWeakened = true;
+            Players.applyingHostDamage = true;
+            try { me.Hp.TakeDamage(me.Hp.HpValue - me.Hp.maxHp * 0.2f); } finally { Players.applyingHostDamage = false; }
+            Logger.LogInfo($"Test night: client weakened to hp {me.Hp.HpValue:0.#}");
+        }
         var target = Enemies.NearestPuppet(me.transform.position);
         if (target == null) return;
         var pos = target.transform.position;
@@ -270,13 +294,23 @@ public class Plugin : BaseUnityPlugin
 
     void TestNightStart()
     {
+        testNights = 1;
         DayNightCycle.Instance.SwitchToNight();
         if (shotPath != null) Invoke(nameof(Shot), 8f);
         InvokeRepeating(nameof(TestStatus), 5f, 10f);
         testChase = true;
     }
 
-    void TestStatus() => Logger.LogInfo($"Test status: {DayNightCycle.Instance.CurrentTimestate}, "
+    void TestStatus()
+    {
+        TestStatusLog();
+        var gs = LocalGamestate.Instance;
+        if (DayNightCycle.Instance.CurrentTimestate != DayNightCycle.Timestate.Day || gs.CurrentState != LocalGamestate.State.InMatch) return;
+        if (testNights < 3) { testNights++; Logger.LogInfo($"Test night: night {testNights}"); DayNightCycle.Instance.SwitchToNight(); }
+        else { Logger.LogInfo("Test night: host resigns"); gs.SetState(LocalGamestate.State.AfterMatchDefeat); }
+    }
+
+    void TestStatusLog() => Logger.LogInfo($"Test status: {DayNightCycle.Instance.CurrentTimestate}, "
         + $"enemies={EnemySpawner.instance.NumberOfEnemiesOnTheMap}, avatar at {Players.ghost.transform.position} "
         + $"active={Players.ghost.activeSelf}, Players.damageToPeer={Players.damageToPeer}, my hp={PlayerMovement.instance.Hp.HpValue}, {Enemies.Status()}");
 
