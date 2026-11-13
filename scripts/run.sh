@@ -20,11 +20,27 @@ launch() { # name, args...
         -logFile "$ROOT/game/player-$name.log" "$@" >/dev/null 2>&1 &)
 }
 
+# Window args for a corner (tr = top right, bl = bottom left) of the usable screen (no menu bar,
+# no Dock): the largest 16:9 size at which two such windows, placed diagonally, never overlap.
+# Height is 48% of the usable height, less if two title bars (28 pt each) would not fit; width
+# is capped at 62% of the usable width. Unity wants pixels, AppKit gives points. Prints nothing
+# without a screen, so the game then keeps its default size.
+geom() {
+    osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(a) {
+        var s = $.NSScreen.mainScreen, v = s.visibleFrame, f = s.frame, k = s.backingScaleFactor, bar = 28;
+        var uw = v.size.width, uh = v.size.height;
+        var h = Math.min(Math.floor(uh * 0.48), Math.floor(uh / 2) - bar), w = Math.floor(h * 16 / 9);
+        if (w > Math.floor(uw * 0.62)) { w = Math.floor(uw * 0.62); h = Math.floor(w * 9 / 16); }
+        var top = f.size.height - v.origin.y - uh;
+        var x = a[0] == "tr" ? v.origin.x + uw - w : v.origin.x, y = a[0] == "tr" ? top : top + uh - h - bar;
+        return ["-screen-width", w * k, "-screen-height", h * k, "-screen-fullscreen", 0, "--mp-window-pos", x * k + "," + y * k].join(" "); }' "$1" 2>/dev/null || true
+}
+
 case $MODE in
     single) launch single "$@" ;;
-    host)   launch host --mp-host "$@" ;;
-    client) launch client --mp-join --mp-profile client "$@" ;;
-    both)   launch host --mp-host "$@"; sleep 2; launch client --mp-join --mp-profile client "$@" ;;
+    host)   launch host --mp-host $(geom tr) "$@" ;;
+    client) launch client --mp-join --mp-profile client $(geom bl) "$@" ;;
+    both)   launch host --mp-host $(geom tr) "$@"; sleep 2; launch client --mp-join --mp-profile client $(geom bl) "$@" ;;
     steam-host) launch host --mp-steam-host "$@" ;;
     steam-client)
         case $1 in [0-9]*) LOBBY=$1; shift ;; *)

@@ -23,6 +23,10 @@ class MatchSync
     static readonly AccessTools.FieldRef<PlayerInteraction, int> BalanceField =
         AccessTools.FieldRefAccess<PlayerInteraction, int>("balance");
     static readonly AccessTools.FieldRef<EnemySpawner, int> WaveField = AccessTools.FieldRefAccess<EnemySpawner, int>("wavenumber");
+    // Inputs of ScoreManager's time bonus; the client's own clocks stand still (frozen cycle, no spawning).
+    static readonly AccessTools.FieldRef<DayNightCycle, float> NightLengthField = AccessTools.FieldRefAccess<DayNightCycle, float>("currentNightLength");
+    static readonly AccessTools.FieldRef<EnemySpawner, float> SpawnPeriodField = AccessTools.FieldRefAccess<EnemySpawner, float>("lastSpawnPeriodDuration");
+    float hostNightLength, hostSpawnPeriod;
     static readonly AccessTools.FieldRef<PlayerInteraction, int> CoresField =
         AccessTools.FieldRefAccess<PlayerInteraction, int>("energyCoreBalance");
 
@@ -100,7 +104,8 @@ class MatchSync
             sentTimeScene = scene;
             sentTime = (int)cycle.CurrentTimestate;
             sentWave = wave;
-            link.SendMessage(Write(w => { w.Write(MsgTime); w.Write(scene); w.Write((byte)sentTime); w.Write(wave); }));
+            link.SendMessage(Write(w => { w.Write(MsgTime); w.Write(scene); w.Write((byte)sentTime); w.Write(wave);
+                w.Write(cycle.CurrentNightLength); w.Write(EnemySpawner.instance != null ? EnemySpawner.instance.LastSpawnPeriodDuration : 0f); }));
             p.Log($"Match: time {cycle.CurrentTimestate} wave {wave} in {scene} sent to peer");
         }
 
@@ -180,7 +185,14 @@ class MatchSync
         if (cycle != null && hostTime >= 0 && timeScene == scene && (int)cycle.CurrentTimestate != hostTime)
         {
             p.Log($"Match: time follows host -> {(DayNightCycle.Timestate)hostTime}");
-            if (hostTime == (int)DayNightCycle.Timestate.Night) cycle.SwitchToNight(); else cycle.SwithToDay();
+            if (hostTime == (int)DayNightCycle.Timestate.Night) cycle.SwitchToNight();
+            else
+            {
+                // The dawn score (time bonus) is computed inside SwithToDay: use the host's night.
+                NightLengthField(cycle) = hostNightLength;
+                if (EnemySpawner.instance != null) SpawnPeriodField(EnemySpawner.instance) = hostSpawnPeriod;
+                cycle.SwithToDay();
+            }
         }
         // After the switch: SwitchToNight starts spawning, which advances the wave by one.
         var spawner = EnemySpawner.instance;
@@ -213,6 +225,8 @@ class MatchSync
                 timeScene = r.ReadString();
                 hostTime = r.ReadByte();
                 hostWave = r.ReadInt32();
+                hostNightLength = r.ReadSingle();
+                hostSpawnPeriod = r.ReadSingle();
                 break;
             case MsgBalance when p.role == "client":
                 balanceScene = r.ReadString();

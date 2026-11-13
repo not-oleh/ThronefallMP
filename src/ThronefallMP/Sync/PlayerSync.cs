@@ -170,6 +170,13 @@ class PlayerSync
         var rigs = ghost.GetComponentsInChildren<CameraRig>(true);
         foreach (var r in rigs) Object.DestroyImmediate(r.gameObject);
         foreach (var c in ghost.GetComponentsInChildren<Camera>(true)) Object.DestroyImmediate(c);
+        // Unit-command visuals (range ring, white "commanding" circle) are switched off by
+        // CommandUnits and their own Start, neither of which ever runs on the copy.
+        foreach (var c in ghost.GetComponentsInChildren<CommandUnits>(true))
+        {
+            if (c.rangeIndicator != null) c.rangeIndicator.gameObject.SetActive(false);
+            if (c.commandingIndicator != null) c.commandingIndicator.SetActive(false);
+        }
         // Game scripts first: several [RequireComponent] the pathfinding/controller ones.
         bool Strip(Component c) => c != null && c != ghostHp && c != tag && !(c is OneShotAnimationBase);
         var all = ghost.GetComponentsInChildren<Component>(true);

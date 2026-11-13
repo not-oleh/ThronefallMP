@@ -58,7 +58,8 @@ pkill -f "ThronefallMod/game/thronefall.app"      # stop all instances
 - A typical unattended check: launch host, `sleep 2`, launch client, `sleep 60–100`, grep logs, pkill.
 
 Plugin flags: `--mp-host [port]`, `--mp-join [ip[:port]]`, `--mp-profile name`,
-`--mp-autostart [scene]`, `--mp-equip a,b`, `--mp-test-night`, `--mp-shot file.png`.
+`--mp-autostart [scene]`, `--mp-equip a,b`, `--mp-test-night`, `--mp-shot file.png`,
+`--mp-qa` (scripted playtest via `/tmp/tf_qa_host.cmd` / `tf_qa_client.cmd`, see `Qa.cs`).
 Scene names: `_StartMenu`, `_LevelSelect`, `_LevelSelectCraaghelm`, `Neuland(Tutorial)`, `Nordfels`,
 `Durststein`, `Frostsee`, `Uferwind`, `Sturmklamm`, `Wildbach`, `Moorweg`, `Freifort`, `Totend`,
 `Craaghelm_map01`…`08`. Weapon names: Long Bow, Light Spear, Heavy Sword, Lightning Wand,

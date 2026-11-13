@@ -97,7 +97,8 @@ static class TreasuryPatch
     static bool PreAdd(PlayerInteraction __instance) => !Plugin.Instance.Match.ShouldSuppressClientGain(__instance);
 
     [HarmonyPostfix, HarmonyPatch(nameof(PlayerInteraction.AddCoin))]
-    static void Add(int amount) => Plugin.Instance.Match.LocalChange(amount, 0);
+    // Postfixes also run when the prefix skipped the original: a suppressed gain is not a change.
+    static void Add(int amount, bool __runOriginal) { if (__runOriginal) Plugin.Instance.Match.LocalChange(amount, 0); }
 
     [HarmonyPostfix, HarmonyPatch(nameof(PlayerInteraction.SpendCoins))]
     static void Spend(int amount) => Plugin.Instance.Match.LocalChange(-amount, 0);
@@ -106,7 +107,7 @@ static class TreasuryPatch
     static bool PreAddCores(PlayerInteraction __instance) => !Plugin.Instance.Match.ShouldSuppressClientGain(__instance);
 
     [HarmonyPostfix, HarmonyPatch(nameof(PlayerInteraction.AddEnergyCores))]
-    static void AddCores(int amount) => Plugin.Instance.Match.LocalChange(0, amount);
+    static void AddCores(int amount, bool __runOriginal) { if (__runOriginal) Plugin.Instance.Match.LocalChange(0, amount); }
 
     [HarmonyPostfix, HarmonyPatch(nameof(PlayerInteraction.SpendEnergyCores))]
     static void SpendCores(int amount) => Plugin.Instance.Match.LocalChange(0, -amount);

@@ -30,6 +30,9 @@ namespace ThronefallMP;
 ///   --mp-test-coins          both: change the treasury once the avatar appears (dev/CI)
 ///   --mp-test-rejoin         client: resign mid-match, go to level select, rejoin (dev/CI)
 ///   --mp-shot file.png       save a screenshot once the avatar appears (dev/CI)
+///   --mp-qa                  obey /tmp/tf_qa_<role>.cmd (move, build, night, panel, hurt, shot; see Qa.cs)
+///   --mp-window-pos x,y      move the window there (display pixels from the top-left; run.sh
+///                            computes it together with -screen-width/-screen-height)
 /// F8 (or clicking the overlay) opens the Co-op panel: host a Steam lobby, invite, copy/paste the
 /// lobby id, rejoin, disconnect. Steam invites are accepted at any time while the game runs.
 [BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.9.0")]
@@ -57,7 +60,9 @@ public class Plugin : BaseUnityPlugin
     bool lastFocused = true;
     GUIStyle overlayStyle, buttonStyle, fieldStyle;
     int overlayFontSize;
-    bool panelOpen, etLogged, testRejoin;
+    internal bool panelOpen;
+    bool etLogged, testRejoin;
+    string[] args;
     string lobbyText = "";
     Callback<GameLobbyJoinRequested_t> inviteCallback;
     /// Client: the host scene we left (resign); not followed back into until the host moves on
@@ -80,7 +85,7 @@ public class Plugin : BaseUnityPlugin
         if (!PlayerSync.SelfCheck() || !Interp.SelfCheck() || !Reliable.SelfCheck() || !EnemySync.SelfCheck() || !MatchSync.SelfCheck() || !BuildSync.SelfCheck())
             Logger.LogError("Self-check failed (packet round-trip, interpolation, reliable layer, enemy chunks, match or build sync)");
 
-        var args = Environment.GetCommandLineArgs();
+        args = Environment.GetCommandLineArgs();
         string After(string flag)
         {
             int i = Array.IndexOf(args, flag);
@@ -95,6 +100,7 @@ public class Plugin : BaseUnityPlugin
         testCoins = args.Contains("--mp-test-coins");
         shotPath = After("--mp-shot");
         if (args.Contains("--mp-panel")) panelOpen = true;
+        Qa.Enabled = args.Contains("--mp-qa");
 
         Players.AvatarShown += OnAvatarShown;
         testRejoin = args.Contains("--mp-test-rejoin");
@@ -211,6 +217,7 @@ public class Plugin : BaseUnityPlugin
             if (enemies != null) foreach (var chunk in enemies) link.SendState(chunk);
         }
 
+        Qa.Tick(this);
         Match.Tick(me);
         Builds.Tick(me);
         Enemies.Tick(me);
@@ -393,7 +400,23 @@ public class Plugin : BaseUnityPlugin
         + $"enemies={EnemySpawner.instance.NumberOfEnemiesOnTheMap}, avatar at {Players.ghost.transform.position} "
         + $"active={Players.ghost.activeSelf}, rtt={link.Rtt * 1000f:0}ms, Players.damageToPeer={Players.damageToPeer}, my hp={PlayerMovement.instance.Hp.HpValue}, {Enemies.Status()}");
 
-    void Windowed() => Screen.SetResolution(1280, 720, FullScreenMode.Windowed);
+    /// Size from -screen-width/-screen-height when run.sh passed them: Unity alone would let the
+    /// resolution cached in PlayerPrefs win.
+    void Windowed()
+    {
+        int Arg(string flag, int fallback) { int i = Array.IndexOf(args, flag); return i >= 0 && i + 1 < args.Length && int.TryParse(args[i + 1], out var v) ? v : fallback; }
+        Screen.SetResolution(Arg("-screen-width", 1280), Arg("-screen-height", 720), FullScreenMode.Windowed);
+        Invoke(nameof(PlaceWindow), 0.5f); // after the resize has been applied
+    }
+
+    void PlaceWindow()
+    {
+        int i = Array.IndexOf(args, "--mp-window-pos");
+        var xy = i >= 0 && i + 1 < args.Length ? args[i + 1].Split(',') : null;
+        if (xy == null || xy.Length != 2 || !int.TryParse(xy[0], out var x) || !int.TryParse(xy[1], out var y)) return;
+        Screen.MoveMainWindowTo(Screen.mainWindowDisplayInfo, new Vector2Int(x, y));
+        Logger.LogInfo($"Window: {Screen.width}x{Screen.height} moved to {x},{y} (work area {Screen.mainWindowDisplayInfo.workArea})");
+    }
 
     void Shot()
     {
@@ -439,6 +462,13 @@ public class Plugin : BaseUnityPlugin
             overlayStyle = new GUIStyle(GUI.skin.label) { fontSize = size, wordWrap = false };
             buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = size, padding = new RectOffset(size / 2, size / 2, size / 4, size / 4) };
             fieldStyle = new GUIStyle(GUI.skin.box) { fontSize = size, padding = new RectOffset(size / 2, size / 2, size / 2, size / 2) };
+            // Opaque enough to read over the game's own tooltip, which sits in the same corner.
+            // HideAndDontSave: scene loads unload assets that only a GUIStyle points at.
+            var bg = new Texture2D(1, 1) { hideFlags = HideFlags.HideAndDontSave };
+            bg.SetPixel(0, 0, new Color(0.08f, 0.08f, 0.08f, 0.92f));
+            bg.Apply();
+            fieldStyle.normal.background = bg;
+            fieldStyle.border = new RectOffset(); // a 1x1 texture has no 9-slice border
         }
         var e = Event.current;
         if (e.type == EventType.KeyDown && e.keyCode == KeyCode.F8) { panelOpen = !panelOpen; e.Use(); }
@@ -454,7 +484,8 @@ public class Plugin : BaseUnityPlugin
         if (GUI.Button(rect, text, overlayStyle)) panelOpen = !panelOpen;
         if (!panelOpen) return;
 
-        GUILayout.BeginArea(new Rect(rect.x, rect.yMax + size * 0.3f, size * 18f, Screen.height), fieldStyle);
+        GUILayout.BeginArea(new Rect(rect.x, rect.yMax + size * 0.3f, size * 18f, Screen.height));
+        GUILayout.BeginVertical(fieldStyle); // box as tall as its content
         var steam = link?.Transport as SteamTransport;
         if (role == "off")
         {
@@ -483,6 +514,7 @@ public class Plugin : BaseUnityPlugin
             if (GUILayout.Button("Disconnect", buttonStyle)) Disconnect();
         }
         if (lobbyText != "") GUILayout.Label(lobbyText, overlayStyle);
+        GUILayout.EndVertical();
         GUILayout.EndArea();
     }
 

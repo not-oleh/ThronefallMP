@@ -13,7 +13,7 @@ namespace ThronefallMP;
 /// counters restart too.
 class Link
 {
-    public const byte Protocol = 9;
+    public const byte Protocol = 10;
     const byte KState = 0, KMessage = 1, KAck = 2, KPing = 3, KPong = 4;
 
     readonly ITransport transport;

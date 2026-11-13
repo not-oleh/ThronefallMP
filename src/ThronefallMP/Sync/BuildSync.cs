@@ -18,7 +18,7 @@ class BuildSync
 {
     internal const byte MsgBuilt = 10, MsgRequest = 11;
     internal static readonly AccessTools.FieldRef<BuildSlot, int> LevelField = AccessTools.FieldRefAccess<BuildSlot, int>("level");
-    static readonly AccessTools.FieldRef<BuildSlot, BuildSlot.Upgrade> SelectedField =
+    internal static readonly AccessTools.FieldRef<BuildSlot, BuildSlot.Upgrade> SelectedField =
         AccessTools.FieldRefAccess<BuildSlot, BuildSlot.Upgrade>("upgradeSelected");
     static readonly AccessTools.FieldRef<BuildSlot, PlayerInteraction> PlayerField =
         AccessTools.FieldRefAccess<BuildSlot, PlayerInteraction>("playerInteractionSelected");
