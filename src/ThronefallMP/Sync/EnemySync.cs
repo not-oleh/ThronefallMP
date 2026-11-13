@@ -44,6 +44,7 @@ class EnemySync
     readonly Dictionary<string, GameObject> prefabs = new();
     internal bool applying;
     EnemySpawner suppressedLoggedFor;
+    PlayerInteraction puppetsFor;
     int built, killed, hitsSent, hitsApplied, scopedHitsSent;
 
     // Both: building hp, indexed by sorted slot id (identical on both instances).
@@ -108,11 +109,13 @@ class EnemySync
 
         gone.Clear();
         foreach (var kv in tracked)
-            if (kv.Key == null || !kv.Key.gameObject.activeInHierarchy || kv.Value.hp == null || kv.Value.hp.HpValue <= 0f) gone.Add(kv.Key);
+            if (kv.Key == null || !kv.Key.gameObject.activeInHierarchy || kv.Value.hp == null
+                || (kv.Value.hp.HpValue <= 0f && !kv.Value.hp.getsKnockedOutInsteadOfDying)) gone.Add(kv.Key);
         foreach (var tag in gone)
         {
             var (id, hp) = tracked[tag];
-            // Dead enemies are destroyed (Hp.TakeDamage), so a missing object means a kill.
+            // Dead enemies are destroyed (Hp.TakeDamage), so a missing object means a kill. Bosses
+            // that get knocked out (phases) stay tracked until their object goes away.
             bool killed = tag == null || hp == null || hp.HpValue <= 0f;
             tracked.Remove(tag);
             live.Remove(id);
@@ -247,7 +250,10 @@ class EnemySync
         {
             if (!puppets.TryGetValue(id, out var pu) || pu.Go == null) continue;
             pu.Pos = pos; pu.Yaw = yaw * 360f / 256f;
-            if (pu.Hp != null && hp > 0f && Mathf.Abs(pu.Hp.HpValue - hp) > 0.01f) pu.Hp.SetHpTo(hp);
+            if (pu.Hp == null || Mathf.Abs(pu.Hp.HpValue - hp) <= 0.01f) continue;
+            // Phase bosses (Crystal Dragon, Lava Golem) sit at 0 while knocked out; others die by despawn.
+            if (hp > 0f || pu.Hp.getsKnockedOutInsteadOfDying) pu.Hp.SetHpTo(hp);
+            if (hp > pu.Hp.maxHp) pu.Hp.maxHp = hp; // The Scrapper grows its max hp
         }
         if (blds == null) return;
         hostBuildingHp.Clear();
@@ -284,6 +290,12 @@ class EnemySync
         if (p.role != "client" || me == null) return;
         string scene = me.gameObject.scene.name;
         bool inMatch = InScene(scene);
+        if (puppetsFor != PlayerInteraction.instance)
+        {
+            // A new scene load (rejoin after resign): old puppets died with the scene, rebuild all known.
+            puppetsFor = PlayerInteraction.instance;
+            puppets.Clear(); puppetHps.Clear(); prefabs.Clear();
+        }
 
         foreach (var kv in known)
         {

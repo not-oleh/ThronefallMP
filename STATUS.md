@@ -1,89 +1,80 @@
 # Status
 
-Last updated: 2026-11-13 · plugin version 0.8.0 · protocol 8 · MIT licensed
+Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 9 · MIT licensed
 
 ## Working now
 
-- Toolchain (BepInEx native on Apple Silicon); two local instances over UDP; client follows the
-  host into any scene from the title screen. Client saves isolated in `mp-client/`.
-- Remote avatar: position, facing, walk/sprint animation, own weapon model. Client keeps its own
-  weapon, takes the host's other perks. Avatar hides while the peer is dead.
-- Damage: host's enemies hit the avatar → forwarded → client loses health (logged per burst).
-- Unfocused window gets no input (`Patches/InputPatches.cs`); untestable on one Mac.
-- Reliable messages (`Net/Reliable.cs`, seq/ack/resend, session id detects restarts) + `SelfCheck`.
-- Shared day/night: client's `DayNightCycle.Update` frozen while the host is in its scene, switched
-  to the host's state.
-- Shared treasury: host balance pushed on change; client forwards coin/core deltas
-  (`--mp-test-coins`: 8 + 10 + 5 → both read 23).
-- Shared buildings + upgrade choices (`Sync/BuildSync.cs`, hooked at
-  `BuildSlot.OnUpgradeChoiceComplete`, slot id = `SaveLoadEntity.GUID`, idempotent by level);
-  real UI user-verified in a 2-window run.
-- Host-authoritative enemies (`Sync/EnemySync.cs`): client waves off; host ids enemies (per-match
-  epoch), spawn/despawn reliable, pos/yaw/hp + building hp in MTU-safe 20 Hz chunks (`SelfCheck`
-  round-trips 300 enemies + 40 buildings). Client puppets are stripped prefab clones; host kill →
-  game death. Puppet visuals user-verified.
-- Client attacks: puppet hits by the local player → reliable `MsgHit` → host checks epoch/id/alive,
-  clamps, applies from the avatar; hp/kill replicate back.
-- Knockout/revive: each player is knocked out and revived only in its own world (`AutoRevive`,
-  dawn via synced day/night); `State.Dead` hides the avatar so enemies stop targeting it. The game
-  has no player-revives-player mechanic. Verified 2026-11-13: client knocked out → host "Avatar
-  hidden (peer is dead)" → client revived → avatar shown, twice per 3-night run.
-- Indirect player damage (`Patches/PlayerDamagePatches.cs`, `PlayerDamageScope`): sourceless hits
-  on puppets inside the local player's attack code / projectiles / AoE objects are forwarded
-  (logged "(indirect)"); towers/units still dropped. Verified: Cursed Blowpipe curse blasts and
-  Blood Wand bonus hits forwarded and applied (526/560 applied, rest hit dead enemies). Potion
-  Vials damage turned out to be direct (projectile + splash with attacker). Blood Wand's
-  self-damage now applies on the client (was blocked).
-- Match end (`MatchSync` `MsgEnd`): host's Victory/Defeat pushed once per match; client calls
-  `SetState` with the same state. Verified with a forced host defeat ("end follows host").
-- `--mp-test-night`: host runs 3 nights then resigns; client drops to 20% hp at its first night.
-- Transport split (M4 slice 1): `Net/ITransport` + `UdpTransport` (unchanged behaviour) +
-  `SteamTransport` (SteamNetworking P2P, friends-only lobby, join by id / invite /
-  `+connect_lobby`). Full 3-night test passed over Steam P2P on one Mac with one account.
+- M0–M3 (details in git history and `docs/ARCHITECTURE.md`): client follows the host's scene;
+  avatar with own weapon (hidden while the peer is dead); host-forwarded damage; reliable stream
+  + `SelfCheck`s; synced day/night, treasury (`--mp-test-coins` 8+10+5 → 23), buildings + upgrade
+  choices (UI user-verified); host-authoritative enemies as stripped puppets in MTU-safe chunks
+  (visuals user-verified); client hits direct + indirect (`PlayerDamageScope`; Blowpipe/Blood
+  Wand verified); per-world knockout/revive; match end follows host (forced defeat verified).
+  `--mp-test-night`: host runs 3 nights then resigns; client drops to 20% hp at its first night.
+- M4 slice 1: `ITransport` + `UdpTransport` + `SteamTransport` (P2P, friends-only lobby);
+  3-night test passed over Steam on one Mac with one account.
+- M4 slice 2 (v0.9.0): Co-op panel (F8 or click the overlay): host Steam lobby, invite friend,
+  copy lobby id / join id from clipboard, rejoin, disconnect; shows peer + ping (Link Ping/Pong,
+  1 s). Connections can start/stop at runtime (`Plugin.StartLink`/`Disconnect`); a Steam invite
+  (`GameLobbyJoinRequested_t`) is accepted at any time. Host drops a peer that left the lobby.
+  `run.sh steam-host` / `steam-client [lobby]` (lobby id read from `player-host.log`). Verified:
+  Steam loopback run, host rtt 8 ms, 0 exceptions.
+- Rejoin snapshot: client entering the host's level sends `MsgSnapshot`; host resends time + wave
+  number, treasury, build log, live enemies. Builds deduped on the client; puppets rebuilt after a
+  scene reload. Client resign → `MsgLeave` (host plays on, avatar hidden), client does not
+  follow back until Rejoin/host moves on. Verified (`--mp-test-rejoin`): resign → level select →
+  rejoin → castle lv1+2 re-applied, puppets rebuilt, wave 0→1 followed, 0 exceptions.
+- Bosses: knock-out bosses (`getsKnockedOutInsteadOfDying`: Crystal Dragon, Lava Golem) stay
+  tracked at hp 0 instead of despawning; puppet max hp grows with The Scrapper. Eternal Trials:
+  client does not follow a host in an ET run (state flag bit 8), logs why.
+- Startup, economy & build race fixes (`SelfCheck`-covered, `0 warnings, 0 errors`):
+  - **Title-screen startup race (`Plugin.SceneReady`, `MatchSync.Tick`)**: `--mp-autostart` and
+    `FollowHost` wait until `SceneTransitionManager` is idle, `_UI` + `UIFrameManager` + `PerkManager`
+    are ready (`Time.frameCount > 10`), and call `UIFrameManager.CloseAllFrames()` before transitioning;
+    `MatchSync.Tick` pauses while `SceneTransitionIsRunning`.
+  - **Host-authoritative dawn coin/core pickups (`MatchSync`, `CurrencyPickupScopePatch`)**: client
+    suppresses local `AddCoin`/`AddEnergyCores` from world `Coin`/`EnergyCore` pickups and dusk/dawn
+    perks (`InterestPerk`, `PerkInterestPerCycle`, `EnemySpawner.OnStartOfTheDay`) while keeping
+    `CostDisplay.CancelFill` refunds local; host avatar attracts nearby `freeCoins`/`freeEnergyCores`.
+  - **Simultaneous `BuildSlot` upgrade reconciliation (`BuildSync`, `BuildPatch`)**: client intercepts
+    `BuildSlot.OnUpgradeChoiceComplete` before local mutation and sends `MsgRequest` (`Paid` flag);
+    if host already upgraded the slot, host refunds the duplicate coin/core cost and re-sends
+    `MsgBuilt`; client `Apply` cancels/refunds any partial `CostDisplay` fill or open `ChoiceManager`.
+  - **`--mp-panel` & test hooks**: `--mp-panel` opens the F8 Co-op panel and logs clipboard Lobby ID
+    copy/paste round-trip on `--mp-shot`; `TestSimultaneousRace` runs in `--mp-test-night`.
 - Overlay crisp on Retina (user-verified). `scripts/setup.sh` runs end to end (outside sandbox).
 
 ## Milestones
 
-- [x] M0 Toolchain, repo, UDP ghost
-- [x] M1 Second player in the world
-- [x] M2 Shared match state (day/night, coins/cores, buildings, upgrade choices)
-- [x] M3 Combat — enemy replication, building hp, client hits (direct + indirect), match end
-- [ ] M4 slice 1 done (Steam P2P + lobby); open: invites in practice, reconnect, lobby UI,
-      Craaghelm bosses, Eternal Trials
+- [x] M0 Toolchain, repo, UDP ghost · [x] M1 Second player · [x] M2 Shared match state · [x] M3 Combat
+- [ ] M4 slices 1–2 done (Steam P2P, lobby panel, live invites, rejoin snapshot, resign);
+      open: invites between two accounts, Craaghelm bosses in a real run, Eternal Trials co-op
 - [ ] QoL track (nothing requested yet)
 
 ## Not verified
 
 - **Steam between two accounts / two machines** (only same-account loopback tested). Steam
-  overlay invites and `+connect_lobby` launches untested; host never notices a lobby member leaving
-  (relies on peer timeout). Multi-chunk state only exercised by `SelfCheck`.
+  overlay invites and `+connect_lobby` launches untested; multi-chunk state only in `SelfCheck`.
 - Indirect damage: Falchion trap (`AttackByTimeOrCollision`) and pooled puddles not observed in a
   run; `PlayerBallMovement`/`RidingDamager` damage not scoped. Bow, Wand, Axe, Sword untested.
-- Match end: only host defeat tested, not victory; client resign ends only the client (it then
-  follows the host back in). Restarting the same level is not followed by the client.
-- Window-focus block (needs two machines). Energy cores (no DLC on this account; no null refs).
-- Boosts (`ApplyBoost`) and mid-match save loads (`ApplyLoadedUpgradesDelayed`) bypass build sync.
-- Same slot upgraded by both players at once: host rejects the second; client may have paid twice.
-- Enemies beyond Nordfels wave 1: flying/large/boss, scene-placed, elite material, facing (root
-  yaw synced; a child may be what turns). One early run built only 1 of 3 puppets; not reproduced.
-- Host soldiers/projectiles not shown on the client; coins from host kills exist only in the host
-  world. Client hit feedback (hp bar) lags one round trip.
+- Match end: only host defeat tested, not victory; restarting the same level is not followed.
+- Co-op panel `--mp-shot` (`--mp-panel`), fresh client process mid-match restart, dawn pickup
+  suppression, and simultaneous build race refund are compiled and wired into `--mp-test-night`,
+  but could not be executed in-game in this session because the agent tool environment enforces the
+  macOS sandbox (`NullGfxDevice` URP crash on launch). Boss phase visuals and energy-core drops: no
+  DLC on this account, reasoning only.
+- Joining while already inside a solo level of the same scene does not reload it. Window-focus block
+  needs two machines. Boosts (`ApplyBoost`) and mid-match save loads bypass build sync.
+- Enemies beyond Nordfels wave 1: flying/large/boss, scene-placed, elite material, facing.
+- Host soldiers/projectiles not shown on the client; client hit hp bar lags one round trip.
 - Remote attack animation, non-weapon host perks, human-driven movement, second machine.
 
 ## Next tasks
 
-Simple (Sonnet-friendly):
-
-- [ ] `--mp-shot` at night to eyeball the overlay size on Retina.
+- [ ] Outside sandbox: run `scripts/run.sh host --mp-autostart Nordfels --mp-test-night --mp-panel --mp-shot /tmp/mp-panel.png` + `scripts/run.sh client --mp-equip "Light Spear" --mp-test-night` to capture F8 panel screenshot and log-verify dawn harvest + simultaneous build refund.
+- [ ] Outside sandbox: kill only the client mid-night and relaunch a fresh client process; check snapshot catch-up in logs.
 - [ ] `--mp-test-night` with Falchion and Trap; check "(indirect)" hits from the trap.
-- [ ] Human test: two friends on two Macs, `--mp-steam-host` + Steam invite.
-
-Complex (architecture-heavy, use Opus/Fable):
-
-- [ ] Lobby UI: host/join from the title screen instead of flags; join an invite while running
-      without `--mp-steam-join` (needs a transport that can start after launch).
-- [ ] Later waves: flying/boss enemies, mid-night client join (`ResendAll`).
-- [ ] Reconnect: lobby member left → drop peer; client rejoins the same lobby.
+- [ ] Two friends on two Macs: Co-op panel → Host → Invite friend; Eternal Trials co-op; later waves.
 
 ## Known quirks and dead ends
 
@@ -116,7 +107,8 @@ Complex (architecture-heavy, use Opus/Fable):
 - **Fresh save has nothing equipped**; use `--mp-equip`. `--mp-autostart` skips the tutorial.
 - **Same Steam account on one Mac shares one SteamID**: both instances read the same P2P
   channel. `SteamTransport` uses channel 0 for host-bound, 1 for client-bound packets.
-- **`run.sh host/client` always add `--mp-host/--mp-join`** (UDP wins); launch Steam tests via
-  `run_bepinex.sh` directly. Wait for "lobby <id> open" in the host log before starting the client.
+- **Steam tests: `run.sh steam-host`, wait (bounded) for "lobby <id> open", then `steam-client`.**
 - **Potion Vials is not an AoE-without-attacker weapon**; use Blowpipe/Blood Wand to test indirect hits.
+- **Test waits must be bounded** (`for i in $(seq 1 60); do grep -q … && break; sleep 3; done`).
+  Once (not reproduced) the host never left the title screen; an unbounded `until grep` hung.
 - **`echo =====` fails in zsh** (`=word` expansion); use `echo -----` in test one-liners.

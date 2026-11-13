@@ -51,8 +51,38 @@ scene following, overlay).
 the transport waits for it): the host creates a friends-only lobby with data
 `thronefallmp=<protocol>`, the client joins by id (`--mp-steam-join <id>`), by a Steam invite
 (`GameLobbyJoinRequested_t`), or by Steam's `+connect_lobby <id>` launch argument; its peer is the
-lobby owner. The host accepts P2P sessions only from lobby members. Host receives on channel 0,
-client on channel 1, so one Steam account can run both ends on one Mac.
+lobby owner. The host accepts P2P sessions only from lobby members and drops a peer that leaves
+the lobby (`LobbyChatUpdate_t`). Host receives on channel 0, client on channel 1, so one Steam
+account can run both ends on one Mac. Connections start and stop at runtime
+(`Plugin.StartLink`/`Disconnect`, sync modules rebuilt fresh): from the Co-op panel (F8) or from
+a Steam invite, which `Plugin` listens for globally once `SteamManager` is up. `Link` measures the
+round trip with a Ping/Pong pair once a second (shown in the overlay).
+
+**Rejoin.** Every time the client enters the host's level it sends `MsgSnapshot`; the host
+resends day/night + wave number, treasury, its build log and live enemy spawns. All of these are
+idempotent on the client (level-based, deduped by slot+level, keyed by enemy id), so a resend
+after a resign, timeout or restart never duplicates anything. A client that ends its match itself
+(resign) sends `MsgLeave`; the host plays on and the client stays out until it presses Rejoin or
+the host changes scene.
+
+**Economy & building authority.** Dawn building harvests (`CoinSpawner`/`EnergyCoreSpawner`),
+world coin/core pickups (`Coin.OnCurrencyCollected`, `EnergyCore.Update`), and dusk/dawn perks
+(`InterestPerk`, `PerkInterestPerCycle`, `EnemySpawner.OnStartOfTheDay`) are host-authoritative:
+the client suppresses local `AddCoin`/`AddEnergyCores` from these sources (`CurrencyPickupScopePatch`)
+unless the coin/core was spawned by `CostDisplay.CancelFill` (refunding a cancelled building fill),
+and the host's avatar also attracts nearby `TagManager.freeCoins`/`freeEnergyCores`. On the client,
+completed build choices (`BuildSlot.OnUpgradeChoiceComplete`) are intercepted before mutating the
+slot (`BuildSync.InterceptClientChoice`) and sent as `MsgRequest` to the host; only the host's
+ordered `MsgBuilt` applies upgrades on the client, and if both players upgrade the same slot at
+once, the host rejects the duplicate `MsgRequest`, refunds the client's coins/cores, and re-sends
+its authoritative `MsgBuilt` (cancelling/refunding any client mid-fill or open choice popup).
+
+**Craaghelm / Eternal Trials.** Bosses that get knocked out between phases
+(`Hp.getsKnockedOutInsteadOfDying`) stay tracked at hp 0; puppets accept a growing max hp (The
+Scrapper). Phase controllers are game scripts and are stripped from puppets, so phase visuals do
+not change on the client yet. Energy cores are host-world pickups that reach the client through
+the treasury. Eternal Trials runs are not followed by the client (seeded maps and mutators are not
+shared yet).
 
 **Player damage attribution (client).** Hits on puppets are forwarded to the host only if they
 are the local player's. Direct hits name the player as attacker. Indirect ones (explosions,
@@ -70,9 +100,8 @@ opened around the player's own code: every `ManualAttack` subclass's `Attack`/`U
 - `SteamAppId=2239150` in the environment lets a copy outside the Steam library start.
 - `Application.runInBackground` keeps the unfocused window simulating.
 - `--mp-profile client` redirects the client's saves to `mp-client/`.
-- Steam: launch the game directly with `--mp-steam-host`, read the lobby id from the log, start
-  the second instance with `--mp-steam-join <id> --mp-profile client` (`run.sh host/client` add the
-  UDP flags, which win).
+- Steam: `run.sh steam-host`, wait for "lobby <id> open" in `player-host.log`, then
+  `run.sh steam-client` (reads that id). `--mp-test-rejoin` on the client exercises resign + rejoin.
 - `--mp-autostart` and `--mp-shot` allow unattended smoke tests: launch, wait, check the logs
   for `Peer connected`, `Following host to …` and `Avatar targetable`.
 
@@ -84,7 +113,7 @@ opened around the player's own code: every `ManualAttack` subclass's `Attack`/`U
 | **M1 — Second player in the world** 🟡 (0.3.0) | Done: client follows host scene changes and the host's perks while keeping its own weapon; remote player is an avatar cloned from the local player (own weapon model, walk/sprint/attack animation), registered with `TagManager` so enemies target it; the host forwards damage dealt to the avatar and the client's player takes it; the avatar hides while the peer is dead; only the focused window reads input. Open: remote attack animation, perk copy and human-driven movement not yet observed in a test; second machine untested | Both players walk into a level together and enemies target either |
 | **M2 — Shared match state** ✅ | Day/night, coins and energy cores, build slots and upgrades, upgrade choices, win/lose (host's end state pushed, M3 close-out) | A full level can be played to the end with building and economy in sync |
 | **M3 — Combat** ✅ | Enemy spawn/position/health replication, player attacks and damage, unit commands, revive | Nights look the same on both screens |
-| **M4 — Release quality** 🟡 (slice 1: Steam P2P + lobby) | Steam lobbies and invites, reconnect, version handshake UI, Craaghelm bosses, Eternal Trials | A friend can join via Steam overlay |
+| **M4 — Release quality** 🟡 (0.9.0: Steam P2P, lobby panel, live invites, rejoin snapshot) | Steam lobbies and invites, reconnect, version handshake UI, Craaghelm bosses, Eternal Trials | A friend can join via Steam overlay |
 | **QoL track** (parallel) | Small independent toggles, added on request | Each ships on its own |
 
 Decisions taken in M1:

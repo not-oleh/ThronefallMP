@@ -18,7 +18,7 @@ class PlayerSync
         public string Scene, Weapon;
         public Vector3 Pos;
         public float Yaw, DamageToPeer;
-        public bool Moving, Sprinting, Dead;
+        public bool Moving, Sprinting, Dead, EternalTrial;
         public byte Attacks;
         public string[] Loadout;
     }
@@ -80,6 +80,7 @@ class PlayerSync
                 Moving = me.Moving,
                 Sprinting = me.Sprinting,
                 Dead = me.Hp != null && me.Hp.KnockedOut,
+                EternalTrial = LocalGamestate.SelectedGameMode == LocalGamestate.GameMode.EternalTrial,
                 Attacks = attacks,
                 DamageToPeer = damageToPeer,
                 Weapon = equipped.OfType<EquippableWeapon>().FirstOrDefault()?.name,
@@ -256,7 +257,7 @@ class PlayerSync
         w.Write(s.Scene ?? "");
         w.Write(s.Pos.x); w.Write(s.Pos.y); w.Write(s.Pos.z);
         w.Write(s.Yaw);
-        w.Write((byte)((s.Moving ? 1 : 0) | (s.Sprinting ? 2 : 0) | (s.Dead ? 4 : 0)));
+        w.Write((byte)((s.Moving ? 1 : 0) | (s.Sprinting ? 2 : 0) | (s.Dead ? 4 : 0) | (s.EternalTrial ? 8 : 0)));
         w.Write(s.Attacks);
         w.Write(s.DamageToPeer);
         w.Write(s.Weapon ?? "");
@@ -276,6 +277,7 @@ class PlayerSync
         s.Moving = (flags & 1) != 0;
         s.Sprinting = (flags & 2) != 0;
         s.Dead = (flags & 4) != 0;
+        s.EternalTrial = (flags & 8) != 0;
         s.Attacks = r.ReadByte();
         s.DamageToPeer = r.ReadSingle();
         s.Weapon = r.ReadString();
@@ -289,11 +291,11 @@ class PlayerSync
     {
         var a = new State
         {
-            Scene = "x", Pos = new Vector3(1, 2, 3), Yaw = 90f, Sprinting = true, Dead = true,
+            Scene = "x", Pos = new Vector3(1, 2, 3), Yaw = 90f, Sprinting = true, Dead = true, EternalTrial = true,
             Attacks = 7, DamageToPeer = 12.5f, Weapon = "Bow", Loadout = new[] { "Bow", "Perk" },
         };
         var b = Decode(Encode(a));
-        return b.Scene == a.Scene && b.Pos == a.Pos && b.Yaw == a.Yaw && b.Sprinting && !b.Moving && b.Dead
+        return b.Scene == a.Scene && b.Pos == a.Pos && b.Yaw == a.Yaw && b.Sprinting && !b.Moving && b.Dead && b.EternalTrial
             && b.Attacks == 7 && b.DamageToPeer == 12.5f && b.Weapon == "Bow" && b.Loadout.SequenceEqual(a.Loadout);
     }
 }

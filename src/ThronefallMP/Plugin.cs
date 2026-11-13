@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using BepInEx;
 using HarmonyLib;
 using UnityEngine;
+using Steamworks;
 using UnityEngine.SceneManagement;
 
 namespace ThronefallMP;
@@ -27,8 +28,11 @@ namespace ThronefallMP;
 ///                            avatar on the nearest enemy, then resign (match-end sync);
 ///                            client: build one slot, drop to 20% hp at night, attack (dev/CI)
 ///   --mp-test-coins          both: change the treasury once the avatar appears (dev/CI)
+///   --mp-test-rejoin         client: resign mid-match, go to level select, rejoin (dev/CI)
 ///   --mp-shot file.png       save a screenshot once the avatar appears (dev/CI)
-[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.8.0")]
+/// F8 (or clicking the overlay) opens the Co-op panel: host a Steam lobby, invite, copy/paste the
+/// lobby id, rejoin, disconnect. Steam invites are accepted at any time while the game runs.
+[BepInPlugin("dev.thronefallmp", "Thronefall MP", "0.9.0")]
 public class Plugin : BaseUnityPlugin
 {
     const int DefaultPort = 27015;
@@ -51,16 +55,30 @@ public class Plugin : BaseUnityPlugin
     string[] equipFlag;
     PlayerMovement lastMe;
     bool lastFocused = true;
-    GUIStyle overlayStyle;
+    GUIStyle overlayStyle, buttonStyle, fieldStyle;
     int overlayFontSize;
+    bool panelOpen, etLogged, testRejoin;
+    string lobbyText = "";
+    Callback<GameLobbyJoinRequested_t> inviteCallback;
+    /// Client: the host scene we left (resign); not followed back into until the host moves on
+    /// or the player presses Rejoin.
+    internal string followPaused;
 
     internal bool PeerAlive => Time.unscaledTime - lastHeard < PeerTimeout;
+
+    static bool SceneReady =>
+        SceneTransitionManager.instance is { SceneTransitionIsRunning: false } stm
+        && PerkManager.instance != null
+        && UIFrameManager.instance != null
+        && Time.frameCount > 10
+        && SceneManager.GetSceneByName(stm.uiScene).isLoaded;
 
     void Awake()
     {
         Instance = this;
         Players = new PlayerSync(this);
-        if (!PlayerSync.SelfCheck() || !Reliable.SelfCheck() || !EnemySync.SelfCheck()) Logger.LogError("Self-check failed (packet round-trip, reliable layer or enemy chunks)");
+        if (!PlayerSync.SelfCheck() || !Reliable.SelfCheck() || !EnemySync.SelfCheck() || !MatchSync.SelfCheck() || !BuildSync.SelfCheck())
+            Logger.LogError("Self-check failed (packet round-trip, reliable layer, enemy chunks, match or build sync)");
 
         var args = Environment.GetCommandLineArgs();
         string After(string flag)
@@ -76,65 +94,89 @@ public class Plugin : BaseUnityPlugin
         testNight = args.Contains("--mp-test-night");
         testCoins = args.Contains("--mp-test-coins");
         shotPath = After("--mp-shot");
+        if (args.Contains("--mp-panel")) panelOpen = true;
 
+        Players.AvatarShown += OnAvatarShown;
+        testRejoin = args.Contains("--mp-test-rejoin");
         if (args.Contains("--mp-host"))
-        {
-            role = "host";
-            link = new Link(new UdpTransport(new UdpClient(int.TryParse(After("--mp-host"), out var p) ? p : DefaultPort), null, isHost: true), () => Time.unscaledTime);
-        }
+            StartLink("host", new UdpTransport(new UdpClient(int.TryParse(After("--mp-host"), out var p) ? p : DefaultPort), null, isHost: true));
         else if (args.Contains("--mp-join"))
         {
-            role = "client";
             var target = (After("--mp-join") ?? "127.0.0.1").Split(':');
             var peer = new IPEndPoint(IPAddress.Parse(target[0]), target.Length > 1 ? int.Parse(target[1]) : DefaultPort);
-            link = new Link(new UdpTransport(new UdpClient(0), peer, isHost: false), () => Time.unscaledTime);
+            StartLink("client", new UdpTransport(new UdpClient(0), peer, isHost: false));
         }
-        else if (args.Contains("--mp-steam-host"))
-        {
-            role = "host";
-            link = new Link(new SteamTransport(true, 0, Log), () => Time.unscaledTime);
-        }
+        else if (args.Contains("--mp-steam-host")) StartLink("host", new SteamTransport(true, 0, Log));
         else if (args.Contains("--mp-steam-join") || args.Contains("+connect_lobby"))
         {
-            role = "client";
             ulong.TryParse(After("--mp-steam-join") ?? After("+connect_lobby"), out var lobby);
-            link = new Link(new SteamTransport(false, lobby, Log), () => Time.unscaledTime);
+            StartLink("client", new SteamTransport(false, lobby, Log));
         }
-
-        if (link != null)
-        {
-            Match = new MatchSync(this, link);
-            Builds = new BuildSync(this, link);
-            Enemies = new EnemySync(this, link);
-            Players.AvatarShown += OnAvatarShown;
-            // Two instances on one Mac: the unfocused one must keep simulating.
-            Application.runInBackground = true;
-            // Delayed: the game re-applies its saved video settings during startup.
-            Invoke(nameof(Windowed), 4f);
-        }
-        else
-        {
-            var none = new Link(null, () => 0f);
-            Match = new MatchSync(this, none);
-            Builds = new BuildSync(this, none);
-            Enemies = new EnemySync(this, none);
-        }
+        else Disconnect();
+        // Delayed: the game re-applies its saved video settings during startup.
+        if (link != null) Invoke(nameof(Windowed), 4f);
 
         new Harmony("dev.thronefallmp").PatchAll();
         Logger.LogInfo($"Thronefall MP loaded: role={role} profile={Profile ?? "(default)"}");
     }
 
+    /// Replaces any current connection (flags at launch, Co-op panel or a Steam invite later).
+    /// Sync modules start fresh: a new peer gets everything through the snapshot request.
+    internal void StartLink(string newRole, ITransport transport)
+    {
+        link?.Close();
+        role = newRole;
+        link = new Link(transport, () => Time.unscaledTime);
+        lastHeard = -999f;
+        followPaused = null;
+        Match = new MatchSync(this, link);
+        Builds = new BuildSync(this, link);
+        Enemies = new EnemySync(this, link);
+        // Two instances on one Mac: the unfocused one must keep simulating.
+        Application.runInBackground = true;
+        Logger.LogInfo($"Connection: {role} over {transport.GetType().Name}");
+    }
+
+    /// Back to single player. The current level (if any) keeps running locally.
+    internal void Disconnect()
+    {
+        if (link != null) Logger.LogInfo($"Connection: closed ({role})");
+        link?.Close();
+        link = null;
+        role = "off";
+        lastHeard = -999f;
+        var none = new Link(null, () => 0f);
+        Match = new MatchSync(this, none);
+        Builds = new BuildSync(this, none);
+        Enemies = new EnemySync(this, none);
+    }
+
+    /// A Steam invite or +connect_lobby arrived while the game was running.
+    void OnSteamInvite(GameLobbyJoinRequested_t r)
+    {
+        Logger.LogInfo($"Steam invite to lobby {r.m_steamIDLobby.m_SteamID}");
+        StartLink("client", new SteamTransport(false, r.m_steamIDLobby.m_SteamID, Log));
+    }
+
     void Update()
     {
-        if (autostart && SceneTransitionManager.instance != null && Time.realtimeSinceStartup > 6f)
+        // Held so it is not garbage collected; needs the game's SteamManager to be up.
+        if (inviteCallback == null && SteamTransport.SteamReady) inviteCallback = Callback<GameLobbyJoinRequested_t>.Create(OnSteamInvite);
+
+        if (autostart && SceneReady && Time.realtimeSinceStartup > 6f)
         {
-            autostart = false;
             ApplyEquipFlag();
-            if (autostartScene == null) SceneTransitionManager.instance.TransitionFromNullToLevelSelect();
+            if (autostartScene == null)
+            {
+                Time.timeScale = PlayerMovement.gameplayTimeScale;
+                UIFrameManager.instance.CloseAllFrames();
+                SceneTransitionManager.instance.TransitionFromNullToLevelSelect();
+            }
             else EnterLevel(autostartScene);
+            if (SceneTransitionManager.instance.SceneTransitionIsRunning) autostart = false;
         }
 
-        if (link == null) return;
+        if (link == null) { Players.UpdateGhost(PlayerMovement.instance); return; }
 
         bool focused = FocusInput.Active;
         if (focused != lastFocused)
@@ -155,9 +197,7 @@ public class Plugin : BaseUnityPlugin
             {
                 Logger.LogInfo($"Peer connected: {link.PeerName}");
                 rebase = true;
-                Match.ResendAll();
-                Builds.ResendAll();
-                Enemies.ResendAll();
+                ResendAll();
             }
         }
 
@@ -177,6 +217,14 @@ public class Plugin : BaseUnityPlugin
         if (testChase) Players.ChaseNearestEnemy();
         FollowHost();
         Players.UpdateGhost(me);
+    }
+
+    /// Host: everything a (re)joining client needs to catch up; each module's sends are idempotent.
+    internal void ResendAll()
+    {
+        Match.ResendAll();
+        Builds.ResendAll();
+        Enemies.ResendAll();
     }
 
     void OnMessage(byte[] data)
@@ -208,15 +256,29 @@ public class Plugin : BaseUnityPlugin
         if (shotPath != null && !shotTaken) Invoke(nameof(Shot), 2f);
         if (testNight) Invoke(role == "host" ? nameof(TestNight) : nameof(TestClientBuild), role == "host" ? 3f : 8f);
         if (testCoins) Invoke(nameof(TestCoins), 3f);
+        if (testRejoin && role == "client") StartCoroutine(TestRejoin());
     }
 
     /// Client only: whenever the host's player is in a different scene, go there with the
     /// host's perks. We keep our own weapon if we have one.
     void FollowHost()
     {
-        var stm = SceneTransitionManager.instance;
         if (role != "client" || !PeerAlive || string.IsNullOrEmpty(Players.Remote.Scene)) return;
-        if (stm == null || stm.SceneTransitionIsRunning || PerkManager.instance == null) return;
+        if (!SceneReady) return;
+        if (Players.Remote.EternalTrial)
+        {
+            // shortcut: Eternal Trials runs (seeded maps, mutators, run perks) are not shared yet;
+            // following as Classic would mismatch buildings and waves, so the client stays put.
+            if (!etLogged) Logger.LogInfo("Host is in an Eternal Trials run; co-op does not support it yet, not following");
+            etLogged = true;
+            return;
+        }
+        etLogged = false;
+        if (followPaused != null)
+        {
+            if (followPaused == Players.Remote.Scene) return;
+            followPaused = null; // the host moved on: follow again
+        }
         if (SceneManager.GetActiveScene().name == Players.Remote.Scene) return;
 
         ApplyEquipFlag();
@@ -242,6 +304,8 @@ public class Plugin : BaseUnityPlugin
 
     static void EnterLevel(string scene)
     {
+        Time.timeScale = PlayerMovement.gameplayTimeScale;
+        UIFrameManager.instance?.CloseAllFrames();
         LocalGamestate.SelectedGameMode = LocalGamestate.GameMode.Classic;
         SceneTransitionManager.instance.TransitionFromNullToLevel(scene);
     }
@@ -267,6 +331,8 @@ public class Plugin : BaseUnityPlugin
             .OrderBy(s => BuildSync.SlotId(s), StringComparer.Ordinal).FirstOrDefault();
         Logger.LogInfo($"Test build: client builds {(slot != null ? slot.buildingName + " " + BuildSync.SlotId(slot) : "nothing (no free slot)")}");
         slot?.TryToBuildOrUpgradeAndPay(PlayerInteraction.instance, false);
+        var castle = CastleCenter.instance != null ? CastleCenter.instance.GetComponentInParent<BuildSlot>() : null;
+        if (castle != null && castle.Level >= 2) Builds.TestSimultaneousRace(castle);
         InvokeRepeating(nameof(TestClientAttack), 5f, 0.5f);
     }
 
@@ -312,13 +378,23 @@ public class Plugin : BaseUnityPlugin
 
     void TestStatusLog() => Logger.LogInfo($"Test status: {DayNightCycle.Instance.CurrentTimestate}, "
         + $"enemies={EnemySpawner.instance.NumberOfEnemiesOnTheMap}, avatar at {Players.ghost.transform.position} "
-        + $"active={Players.ghost.activeSelf}, Players.damageToPeer={Players.damageToPeer}, my hp={PlayerMovement.instance.Hp.HpValue}, {Enemies.Status()}");
+        + $"active={Players.ghost.activeSelf}, rtt={link.Rtt * 1000f:0}ms, Players.damageToPeer={Players.damageToPeer}, my hp={PlayerMovement.instance.Hp.HpValue}, {Enemies.Status()}");
 
     void Windowed() => Screen.SetResolution(1280, 720, FullScreenMode.Windowed);
 
     void Shot()
     {
         shotTaken = true;
+        if (panelOpen)
+        {
+            var prev = GUIUtility.systemCopyBuffer;
+            const ulong sampleLobby = 109775241012345678UL;
+            GUIUtility.systemCopyBuffer = sampleLobby.ToString();
+            bool clipOk = ulong.TryParse(GUIUtility.systemCopyBuffer?.Trim(), out var parsed) && parsed == sampleLobby;
+            lobbyText = "Lobby ID copied";
+            Logger.LogInfo($"Panel: F8 Co-op panel open, clipboard copy/paste round-trip ok={clipOk} ({parsed})");
+            GUIUtility.systemCopyBuffer = prev;
+        }
         ScreenCapture.CaptureScreenshot(shotPath);
     }
 
@@ -348,15 +424,80 @@ public class Plugin : BaseUnityPlugin
         {
             overlayFontSize = size;
             overlayStyle = new GUIStyle(GUI.skin.label) { fontSize = size, wordWrap = false };
+            buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = size, padding = new RectOffset(size / 2, size / 2, size / 4, size / 4) };
+            fieldStyle = new GUIStyle(GUI.skin.box) { fontSize = size, padding = new RectOffset(size / 2, size / 2, size / 2, size / 2) };
         }
+        var e = Event.current;
+        if (e.type == EventType.KeyDown && e.keyCode == KeyCode.F8) { panelOpen = !panelOpen; e.Use(); }
+
         string status = role == "off" ? "single player" : $"{role} · peer {(PeerAlive ? "connected" : "waiting…")}";
-        var text = $"Thronefall MP {Info.Metadata.Version} · {status}";
-        var rect = new Rect(size * 0.7f, size * 0.7f, Screen.width, size * 1.6f);
+        if (PeerAlive && link.Rtt >= 0f) status += $" · {link.Rtt * 1000f:0} ms";
+        var text = $"Thronefall MP {Info.Metadata.Version} · {status}  [{(panelOpen ? "▲" : "▼")} F8]";
+        var rect = new Rect(size * 0.7f, size * 0.7f, overlayStyle.CalcSize(new GUIContent(text)).x + 2, size * 1.6f);
         var color = overlayStyle.normal.textColor;
         overlayStyle.normal.textColor = Color.black;
         GUI.Label(new Rect(rect.x + 1, rect.y + 1, rect.width, rect.height), text, overlayStyle);
         overlayStyle.normal.textColor = color;
-        GUI.Label(rect, text, overlayStyle);
+        if (GUI.Button(rect, text, overlayStyle)) panelOpen = !panelOpen;
+        if (!panelOpen) return;
+
+        GUILayout.BeginArea(new Rect(rect.x, rect.yMax + size * 0.3f, size * 18f, Screen.height), fieldStyle);
+        var steam = link?.Transport as SteamTransport;
+        if (role == "off")
+        {
+            if (GUILayout.Button("Host Steam lobby", buttonStyle)) StartLink("host", new SteamTransport(true, 0, Log));
+            if (GUILayout.Button("Join lobby ID from clipboard", buttonStyle))
+            {
+                if (ulong.TryParse(GUIUtility.systemCopyBuffer?.Trim(), out var id) && id != 0) StartLink("client", new SteamTransport(false, id, Log));
+                else lobbyText = "Clipboard has no lobby ID";
+            }
+            GUILayout.Label("Or accept a Steam invite (friend list → Join game).", overlayStyle);
+        }
+        else
+        {
+            GUILayout.Label($"Peer: {link.PeerName}", overlayStyle);
+            if (steam != null)
+            {
+                GUILayout.Label(steam.LobbyId != 0 ? $"Lobby {steam.LobbyId}" : "Lobby: opening…", overlayStyle);
+                if (steam.IsHost && steam.LobbyId != 0 && GUILayout.Button("Invite friend", buttonStyle)) steam.Invite();
+                if (steam.LobbyId != 0 && GUILayout.Button("Copy lobby ID", buttonStyle))
+                {
+                    GUIUtility.systemCopyBuffer = steam.LobbyId.ToString();
+                    lobbyText = "Lobby ID copied";
+                }
+            }
+            if (followPaused != null && GUILayout.Button("Rejoin host's match", buttonStyle)) Rejoin();
+            if (GUILayout.Button("Disconnect", buttonStyle)) Disconnect();
+        }
+        if (lobbyText != "") GUILayout.Label(lobbyText, overlayStyle);
+        GUILayout.EndArea();
+    }
+
+    /// Client: follow the host back into the match we resigned from (FollowHost does the rest).
+    internal void Rejoin()
+    {
+        Logger.LogInfo($"Rejoining host in {followPaused}");
+        followPaused = null;
+    }
+
+    /// Test: at the first night the client resigns, goes to level select, then rejoins. The
+    /// host must log the leave and the snapshot; the client must rebuild buildings and puppets.
+    IEnumerator TestRejoin()
+    {
+        testRejoin = false;
+        while (DayNightCycle.Instance == null || DayNightCycle.Instance.CurrentTimestate != DayNightCycle.Timestate.Night) yield return null;
+        yield return new WaitForSecondsRealtime(8f);
+        Logger.LogInfo($"Test rejoin: client resigns ({Enemies.Status()}, wave {EnemySpawner.instance?.Wavenumber})");
+        LocalGamestate.Instance.SetState(LocalGamestate.State.AfterMatchDefeat, forceTransition: false, immediate: true);
+        yield return new WaitForSecondsRealtime(6f);
+        Time.timeScale = 1f;
+        SceneTransitionManager.instance.TransitionFromLevelToLevelSelect();
+        yield return new WaitForSecondsRealtime(10f);
+        Logger.LogInfo($"Test rejoin: at {SceneManager.GetActiveScene().name}, followPaused={followPaused}; rejoining");
+        Rejoin();
+        yield return new WaitForSecondsRealtime(20f);
+        Logger.LogInfo($"Test rejoin: back in {SceneManager.GetActiveScene().name}, {Enemies.Status()}, wave {EnemySpawner.instance?.Wavenumber}, "
+            + $"time {DayNightCycle.Instance?.CurrentTimestate}, coins {PlayerInteraction.instance?.Balance}");
     }
 
     void OnDestroy()

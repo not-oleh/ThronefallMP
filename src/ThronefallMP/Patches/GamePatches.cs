@@ -67,7 +67,7 @@ static class DamagePatch
             return false;
         }
 
-        if (p.role == "client" && me != null && __instance == me.Hp)
+        if (p.role == "client" && p.PeerAlive && me != null && __instance == me.Hp)
         {
             // Self-inflicted weapon costs (Blood Wand) stay local; other local damage is the host's.
             if (PlayerDamageScope.Active && !players.applyingHostDamage) return true;
@@ -88,14 +88,22 @@ static class TimePatch
 }
 
 /// Every treasury change on this instance is reported to MatchSync (client forwards it).
+/// World coin/core pickups and dusk/dawn perks are host-authoritative: suppressed on the client
+/// unless the coin/core was spawned by CostDisplay.CancelFill (refunding a cancelled build fill).
 [HarmonyPatch(typeof(PlayerInteraction))]
 static class TreasuryPatch
 {
+    [HarmonyPrefix, HarmonyPatch(nameof(PlayerInteraction.AddCoin))]
+    static bool PreAdd(PlayerInteraction __instance) => !Plugin.Instance.Match.ShouldSuppressClientGain(__instance);
+
     [HarmonyPostfix, HarmonyPatch(nameof(PlayerInteraction.AddCoin))]
     static void Add(int amount) => Plugin.Instance.Match.LocalChange(amount, 0);
 
     [HarmonyPostfix, HarmonyPatch(nameof(PlayerInteraction.SpendCoins))]
     static void Spend(int amount) => Plugin.Instance.Match.LocalChange(-amount, 0);
+
+    [HarmonyPrefix, HarmonyPatch(nameof(PlayerInteraction.AddEnergyCores))]
+    static bool PreAddCores(PlayerInteraction __instance) => !Plugin.Instance.Match.ShouldSuppressClientGain(__instance);
 
     [HarmonyPostfix, HarmonyPatch(nameof(PlayerInteraction.AddEnergyCores))]
     static void AddCores(int amount) => Plugin.Instance.Match.LocalChange(0, amount);
@@ -104,13 +112,55 @@ static class TreasuryPatch
     static void SpendCores(int amount) => Plugin.Instance.Match.LocalChange(0, -amount);
 }
 
+[HarmonyPatch]
+static class CurrencyPickupScopePatch
+{
+    [HarmonyPrefix, HarmonyPatch(typeof(CostDisplay), nameof(CostDisplay.CancelFill))]
+    static void EnterCancelFill() => MatchSync.inCancelFill = true;
+
+    [HarmonyFinalizer, HarmonyPatch(typeof(CostDisplay), nameof(CostDisplay.CancelFill))]
+    static void ExitCancelFill() => MatchSync.inCancelFill = false;
+
+    [HarmonyPostfix, HarmonyPatch(typeof(Coin), nameof(Coin.SetTarget))]
+    static void NoteRefundCoin(Coin __instance)
+    {
+        if (MatchSync.inCancelFill) MatchSync.refundCoins.Add(__instance);
+    }
+
+    [HarmonyPrefix]
+    [HarmonyPatch(typeof(Coin), "OnCurrencyCollected")]
+    [HarmonyPatch(typeof(EnergyCore), "Update")]
+    static void EnterPickup(Coin __instance) => MatchSync.currentPickup = __instance;
+
+    [HarmonyFinalizer]
+    [HarmonyPatch(typeof(Coin), "OnCurrencyCollected")]
+    [HarmonyPatch(typeof(EnergyCore), "Update")]
+    static void ExitPickup() => MatchSync.currentPickup = null;
+
+    [HarmonyPrefix]
+    [HarmonyPatch(typeof(InterestPerk), nameof(InterestPerk.OnDusk))]
+    [HarmonyPatch(typeof(PerkInterestPerCycle), nameof(PerkInterestPerCycle.OnDusk))]
+    [HarmonyPatch(typeof(EnemySpawner), nameof(EnemySpawner.OnStartOfTheDay))]
+    static void EnterAutoGain() => MatchSync.suppressGainDepth++;
+
+    [HarmonyFinalizer]
+    [HarmonyPatch(typeof(InterestPerk), nameof(InterestPerk.OnDusk))]
+    [HarmonyPatch(typeof(PerkInterestPerCycle), nameof(PerkInterestPerCycle.OnDusk))]
+    [HarmonyPatch(typeof(EnemySpawner), nameof(EnemySpawner.OnStartOfTheDay))]
+    static void ExitAutoGain() => MatchSync.suppressGainDepth--;
+}
+
 
 /// Every completed build/upgrade (incl. the branch chosen) goes through here; BuildSync shares it.
 /// BuildSlotExt overrides the method but calls base, so patching BuildSlot covers both.
 [HarmonyPatch(typeof(BuildSlot), nameof(BuildSlot.OnUpgradeChoiceComplete))]
 static class BuildPatch
 {
-    static void Prefix(BuildSlot __instance, out int __state) => __state = BuildSync.LevelField(__instance);
+    static bool Prefix(BuildSlot __instance, Choice _choiceMade, out int __state)
+    {
+        __state = BuildSync.LevelField(__instance);
+        return !Plugin.Instance.Builds.InterceptClientChoice(__instance, _choiceMade);
+    }
 
     static void Postfix(BuildSlot __instance, Choice _choiceMade, int __state)
     {

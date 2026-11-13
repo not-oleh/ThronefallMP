@@ -8,12 +8,13 @@ namespace ThronefallMP;
 ///   State (0)    unreliable, latest wins (player position etc.), resent by the caller each tick
 ///   Message (1)  [seq u16][payload], reliable and in order (see Reliable)
 ///   Ack (2)      [for-session u32][next-expected u16]
+///   Ping (3) / Pong (4)  [sender clock f32], echoed back once a second for the round-trip time
 /// The session id is random per run; a changed id means the peer restarted, so both stream
 /// counters restart too.
 class Link
 {
-    public const byte Protocol = 8;
-    const byte KState = 0, KMessage = 1, KAck = 2;
+    public const byte Protocol = 9;
+    const byte KState = 0, KMessage = 1, KAck = 2, KPing = 3, KPong = 4;
 
     readonly ITransport transport;
     readonly Func<float> clock;
@@ -21,9 +22,14 @@ class Link
     readonly uint session = (uint)Guid.NewGuid().GetHashCode();
     uint peerSession;
     bool hasPeerSession;
+    float nextPing;
+
+    /// Last measured round trip in seconds; negative until the first pong.
+    public float Rtt { get; private set; } = -1f;
 
     public bool HasPeer => transport != null && transport.HasPeer;
     public string PeerName => transport?.PeerName ?? "none";
+    public ITransport Transport => transport;
     /// Raised when the peer restarted (not on first contact). Callers resend their full state.
     public event Action PeerRestarted;
 
@@ -94,6 +100,13 @@ class Link
                         ushort next = r.ReadUInt16();
                         if (forSession == session) reliable.Acked(next);
                         break;
+                    case KPing:
+                        float t = r.ReadSingle();
+                        Send(KPong, w => w.Write(t), null);
+                        break;
+                    case KPong:
+                        Rtt = clock() - r.ReadSingle();
+                        break;
                 }
             }
             catch (Exception e) when (e is IOException || e is FormatException)
@@ -102,6 +115,11 @@ class Link
             }
         }
 
+        if (HasPeer && clock() >= nextPing)
+        {
+            nextPing = clock() + 1f;
+            Send(KPing, w => w.Write(clock()), null);
+        }
         if (HasPeer)
             foreach (var (seq, payload) in reliable.Due(clock()))
                 Transmit(seq, payload);

@@ -9,6 +9,7 @@ namespace ThronefallMP;
 /// friends-only lobby; the client joins it by id or through a Steam invite, and the lobby owner
 /// is its peer. The host accepts P2P sessions only from members of its lobby and answers
 /// whoever sent last (one peer, like UdpTransport).
+/// Invites that arrive while the game runs are handled by Plugin (it may have no transport yet).
 /// Steam itself is initialised and pumped (RunCallbacks) by the game's SteamManager; nothing
 /// happens here until that is done.
 class SteamTransport : ITransport
@@ -28,7 +29,7 @@ class SteamTransport : ITransport
     // Held so the callbacks are not garbage collected.
     Callback<P2PSessionRequest_t> onSessionRequest;
     Callback<LobbyEnter_t> onLobbyEnter;
-    Callback<GameLobbyJoinRequested_t> onInvite;
+    Callback<LobbyChatUpdate_t> onMemberChange;
     CallResult<LobbyCreated_t> onLobbyCreated;
 
     /// Client: `lobbyToJoin` 0 waits for a Steam invite.
@@ -43,16 +44,25 @@ class SteamTransport : ITransport
 
     public bool HasPeer => peer != CSteamID.Nil;
     public string PeerName => HasPeer ? "steam:" + peer.m_SteamID : "none";
+    public bool IsHost => isHost;
+    /// 0 until the lobby is created or entered.
+    public ulong LobbyId => lobby.m_SteamID;
+
+    /// Host: Steam overlay's "invite friends to this lobby" dialog.
+    public void Invite()
+    {
+        if (lobby != CSteamID.Nil) SteamFriends.ActivateGameOverlayInviteDialog(lobby);
+    }
 
     // SteamManager.Instance would create a second manager if the game has not made one yet.
-    static bool SteamReady => ManagerInstance.GetValue(null) != null && SteamManager.Initialized;
+    internal static bool SteamReady => ManagerInstance.GetValue(null) != null && SteamManager.Initialized;
 
     void Start()
     {
         started = true;
         onSessionRequest = Callback<P2PSessionRequest_t>.Create(OnSessionRequest);
         onLobbyEnter = Callback<LobbyEnter_t>.Create(OnLobbyEnter);
-        onInvite = Callback<GameLobbyJoinRequested_t>.Create(r => { if (!isHost) Join(r.m_steamIDLobby); });
+        onMemberChange = Callback<LobbyChatUpdate_t>.Create(OnMemberChange);
         if (isHost)
         {
             onLobbyCreated = CallResult<LobbyCreated_t>.Create(OnLobbyCreated);
@@ -98,6 +108,20 @@ class SteamTransport : ITransport
         lobby = id;
         peer = SteamMatchmaking.GetLobbyOwner(id);
         log($"Steam: in lobby {id.m_SteamID}, host is {PeerName}");
+    }
+
+    /// Host: the peer left the lobby (quit, crash, disconnect). Drop it so a rejoin starts clean.
+    void OnMemberChange(LobbyChatUpdate_t r)
+    {
+        if (!isHost || r.m_ulSteamIDLobby != lobby.m_SteamID) return;
+        const uint gone = (uint)(EChatMemberStateChange.k_EChatMemberStateChangeLeft | EChatMemberStateChange.k_EChatMemberStateChangeDisconnected
+            | EChatMemberStateChange.k_EChatMemberStateChangeKicked | EChatMemberStateChange.k_EChatMemberStateChangeBanned);
+        var user = new CSteamID(r.m_ulSteamIDUserChanged);
+        if ((r.m_rgfChatMemberStateChange & gone) == 0 || user != peer) return;
+        // Same account on both ends (one-Mac tests): that SteamID is still us, keep the session.
+        if (user != SteamUser.GetSteamID()) SteamNetworking.CloseP2PSessionWithUser(user);
+        peer = CSteamID.Nil;
+        log($"Steam: peer {user.m_SteamID} left the lobby; waiting for a rejoin");
     }
 
     void OnSessionRequest(P2PSessionRequest_t r)
