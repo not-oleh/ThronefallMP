@@ -77,8 +77,8 @@ public class Plugin : BaseUnityPlugin
     {
         Instance = this;
         Players = new PlayerSync(this);
-        if (!PlayerSync.SelfCheck() || !Reliable.SelfCheck() || !EnemySync.SelfCheck() || !MatchSync.SelfCheck() || !BuildSync.SelfCheck())
-            Logger.LogError("Self-check failed (packet round-trip, reliable layer, enemy chunks, match or build sync)");
+        if (!PlayerSync.SelfCheck() || !Interp.SelfCheck() || !Reliable.SelfCheck() || !EnemySync.SelfCheck() || !MatchSync.SelfCheck() || !BuildSync.SelfCheck())
+            Logger.LogError("Self-check failed (packet round-trip, interpolation, reliable layer, enemy chunks, match or build sync)");
 
         var args = Environment.GetCommandLineArgs();
         string After(string flag)
@@ -176,7 +176,7 @@ public class Plugin : BaseUnityPlugin
             if (SceneTransitionManager.instance.SceneTransitionIsRunning) autostart = false;
         }
 
-        if (link == null) { Players.UpdateGhost(PlayerMovement.instance); return; }
+        if (link == null) return;
 
         bool focused = FocusInput.Active;
         if (focused != lastFocused)
@@ -216,7 +216,20 @@ public class Plugin : BaseUnityPlugin
         Enemies.Tick(me);
         if (testChase) Players.ChaseNearestEnemy();
         FollowHost();
-        Players.UpdateGhost(me);
+        // The game's SettingsManager re-applies the saved vsync choice; a vsynced unfocused
+        // macOS window stalls, which stalls our packets. Steady 60 FPS while connected.
+        if (QualitySettings.vSyncCount != 0 || Application.targetFrameRate != 60)
+        {
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = 60;
+        }
+    }
+
+    /// After every Update (ours and the game's), so remote motion is applied once per render frame.
+    void LateUpdate()
+    {
+        Players.UpdateGhost(PlayerMovement.instance);
+        if (link != null) Enemies.Smooth();
     }
 
     /// Host: everything a (re)joining client needs to catch up; each module's sends are idempotent.

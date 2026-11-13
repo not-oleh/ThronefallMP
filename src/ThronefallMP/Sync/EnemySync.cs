@@ -24,7 +24,7 @@ class EnemySync
     static readonly AccessTools.FieldRef<Hp, Weapon> DeathAttackField = AccessTools.FieldRefAccess<Hp, Weapon>("spwanAttackOnDeath");
 
     struct Info { public int Epoch; public string Scene, Key; public Vector3 Pos; public bool Elite; public float MaxHp; }
-    class Puppet { public GameObject Go; public Hp Hp; public Vector3 Pos; public float Yaw; }
+    class Puppet { public GameObject Go; public Hp Hp; public readonly Interp Path = new(); }
 
     readonly Plugin p;
     readonly Link link;
@@ -249,7 +249,7 @@ class EnemySync
         foreach (var (id, pos, yaw, hp) in stateBuf)
         {
             if (!puppets.TryGetValue(id, out var pu) || pu.Go == null) continue;
-            pu.Pos = pos; pu.Yaw = yaw * 360f / 256f;
+            pu.Path.Push(Time.unscaledTime, pos, yaw * 360f / 256f);
             if (pu.Hp == null || Mathf.Abs(pu.Hp.HpValue - hp) <= 0.01f) continue;
             // Phase bosses (Crystal Dragon, Lava Golem) sit at 0 while knocked out; others die by despawn.
             if (hp > 0f || pu.Hp.getsKnockedOutInsteadOfDying) pu.Hp.SetHpTo(hp);
@@ -307,16 +307,16 @@ class EnemySync
             }
         }
 
-        float dt = Time.unscaledDeltaTime;
-        foreach (var pu in puppets.Values)
-        {
-            if (pu.Go == null) continue;
-            var t = pu.Go.transform;
-            t.position = Vector3.Lerp(t.position, pu.Pos, 15f * dt);
-            t.rotation = Quaternion.Euler(0f, Mathf.LerpAngle(t.eulerAngles.y, pu.Yaw, 15f * dt), 0f);
-        }
-
         if (inMatch && buildingsFresh) ApplyBuildings(scene);
+    }
+
+    /// Client, every render frame (LateUpdate): puppets glide between host snapshots.
+    internal void Smooth()
+    {
+        float now = Time.unscaledTime;
+        foreach (var pu in puppets.Values)
+            if (pu.Go != null && pu.Path.Sample(now, out var pos, out var rot))
+                pu.Go.transform.SetPositionAndRotation(pos, rot);
     }
 
     Puppet Build(ushort id, Info e)
@@ -358,7 +358,7 @@ class EnemySync
         go.SetActive(true);
         if (built++ < 5 || built % 20 == 0)
             p.Log($"Enemies: puppet #{built} {go.name} at {e.Pos} hp={e.MaxHp}{(e.Elite ? " elite" : "")}, scripts=[{string.Join(",", go.GetComponentsInChildren<MonoBehaviour>(true).Select(c => c.GetType().Name).Distinct())}]");
-        return new Puppet { Go = go, Hp = hp, Pos = e.Pos };
+        return new Puppet { Go = go, Hp = hp };
     }
 
     /// Prefabs referenced by the loaded scene are in memory; prefer the asset over a scene copy.

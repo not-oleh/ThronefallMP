@@ -35,6 +35,9 @@ class PlayerSync
     readonly List<(string name, GameObject root, GameObject visuals, List<OneShotAnimationBase> anims)> ghostWeapons = new();
     byte seenAttacks;
     bool localDead;
+    readonly Interp path = new();
+    Vector3 lastGhostPos;
+    float ghostSpeed;
 
     // Host: total damage its enemies dealt to the avatar. Client: how much of that it has taken.
     internal float damageToPeer;
@@ -50,7 +53,11 @@ class PlayerSync
 
     public PlayerSync(Plugin plugin) => p = plugin;
 
-    internal void OnState(byte[] data) => Remote = Decode(data);
+    internal void OnState(byte[] data)
+    {
+        Remote = Decode(data);
+        path.Push(Time.unscaledTime, Remote.Pos, Remote.Yaw);
+    }
 
     /// `rebase`: we just (re)joined or respawned; damage dealt before is history, not ours to take.
     internal void Tick(PlayerMovement me, bool rebase)
@@ -99,7 +106,7 @@ class PlayerSync
         if (TagManager.instance == null || ghost == null) return;
         var enemy = TagManager.instance.FindClosestTaggedObjectWithTags(ghost.transform.position,
             new List<TagManager.ETag> { TagManager.ETag.EnemyOwned }, new List<TagManager.ETag>());
-        if (enemy != null) Remote.Pos = enemy.transform.position;
+        if (enemy != null) { path.Clear(); path.Push(Time.unscaledTime, enemy.transform.position, Remote.Yaw); }
     }
 
     /// Client only: the host decides what hurts us (see DamagePatch), we apply it to our player.
@@ -191,7 +198,9 @@ class PlayerSync
                 p.Log($"Avatar hidden (peer {(p.PeerAlive ? (Remote.Dead ? "is dead" : "left the scene") : "lost")})");
                 return;
             }
-            ghost.transform.position = Remote.Pos;
+            ghost.transform.position = lastGhostPos = Remote.Pos;
+            path.Clear();
+            path.Push(Time.unscaledTime, Remote.Pos, Remote.Yaw);
             seenAttacks = Remote.Attacks;
             p.Log($"Avatar shown in {Remote.Scene} at {Remote.Pos}, weapon={Remote.Weapon ?? "none"}");
             p.After(1f, LogTargetable);
@@ -199,11 +208,21 @@ class PlayerSync
         }
         if (!show) return;
 
-        var t = ghost.transform;
-        t.position = Vector3.Lerp(t.position, Remote.Pos, 15f * Time.unscaledDeltaTime);
-        ghostMesh.rotation = Quaternion.Euler(0f, Remote.Yaw, 0f);
-        ghostAnimator.SetBool("Moving", Remote.Moving);
-        ghostAnimator.SetBool("Sprinting", Remote.Sprinting);
+        if (path.Sample(Time.unscaledTime, out var pos, out var rot))
+        {
+            ghost.transform.position = pos;
+            ghostMesh.rotation = rot;
+        }
+        // Legs follow the speed actually shown (lags the peer's flags by Interp.Delay); smoothed
+        // so a frame that holds on a late packet does not flicker the walk.
+        var step = ghost.transform.position - lastGhostPos;
+        lastGhostPos = ghost.transform.position;
+        step.y = 0f;
+        float dt = Mathf.Max(Time.unscaledDeltaTime, 1e-4f);
+        ghostSpeed = Mathf.Lerp(ghostSpeed, step.magnitude / dt, Mathf.Clamp01(12f * dt));
+        // PlayerMovement walks at 14 and sprints at 23 units/s.
+        ghostAnimator.SetBool("Moving", ghostSpeed > 1.5f);
+        ghostAnimator.SetBool("Sprinting", ghostSpeed > 18.5f);
 
         // Same rule as the game's PlayerWeaponVisuals: the weapon is drawn at night only.
         bool night = DayNightCycle.Instance != null && DayNightCycle.Instance.CurrentTimestate == DayNightCycle.Timestate.Night;

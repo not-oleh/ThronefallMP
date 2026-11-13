@@ -42,6 +42,11 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 9 · MIT licensed
     `MsgBuilt`; client `Apply` cancels/refunds any partial `CostDisplay` fill or open `ChoiceManager`.
   - **`--mp-panel` & test hooks**: `--mp-panel` opens the F8 Co-op panel and logs clipboard Lobby ID
     copy/paste round-trip on `--mp-shot`; `TestSimultaneousRace` runs in `--mp-test-night`.
+- Smooth remote motion (`Sync/Interp.cs`, `SelfCheck`-covered): avatar and enemy puppets render
+  90 ms in the past between the two bracketing 20 Hz snapshots (Lerp/Slerp, `Plugin.LateUpdate`),
+  snap on jumps > 8 units; avatar walk/sprint bools come from its shown speed (>1.5 / >18.5 u/s).
+  While connected: vsync off, `targetFrameRate = 60` (re-applied if the game's settings reset it).
+  Log-verified: `--mp-test-night` puppets hit/killed, 0 exceptions; smoothness itself not eyeballed.
 - Overlay crisp on Retina (user-verified). `scripts/setup.sh` runs end to end (outside sandbox).
 
 ## Milestones
@@ -52,6 +57,9 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 9 · MIT licensed
 - [ ] QoL track (nothing requested yet)
 
 ## Not verified
+
+- Interpolation looks smooth (needs a human in 2-window play). Snapshots are stamped with
+  receive time, so Steam jitter > ~40 ms would show; fix = sender timestamps in State packets.
 
 - **Steam between two accounts / two machines** (only same-account loopback tested). Steam
   overlay invites and `+connect_lobby` launches untested; multi-chunk state only in `SelfCheck`.
