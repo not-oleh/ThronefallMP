@@ -5,3 +5,7 @@
 bin/
 obj/
 .DS_Store
+
+# local agent instructions
+AGENTS.md
+CLAUDE.md
