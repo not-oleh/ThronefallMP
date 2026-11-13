@@ -27,26 +27,19 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 9 · MIT licensed
 - Bosses: knock-out bosses (`getsKnockedOutInsteadOfDying`: Crystal Dragon, Lava Golem) stay
   tracked at hp 0 instead of despawning; puppet max hp grows with The Scrapper. Eternal Trials:
   client does not follow a host in an ET run (state flag bit 8), logs why.
-- Startup, economy & build race fixes (`SelfCheck`-covered, `0 warnings, 0 errors`):
-  - **Title-screen startup race (`Plugin.SceneReady`, `MatchSync.Tick`)**: `--mp-autostart` and
-    `FollowHost` wait until `SceneTransitionManager` is idle, `_UI` + `UIFrameManager` + `PerkManager`
-    are ready (`Time.frameCount > 10`), and call `UIFrameManager.CloseAllFrames()` before transitioning;
-    `MatchSync.Tick` pauses while `SceneTransitionIsRunning`.
-  - **Host-authoritative dawn coin/core pickups (`MatchSync`, `CurrencyPickupScopePatch`)**: client
-    suppresses local `AddCoin`/`AddEnergyCores` from world `Coin`/`EnergyCore` pickups and dusk/dawn
-    perks (`InterestPerk`, `PerkInterestPerCycle`, `EnemySpawner.OnStartOfTheDay`) while keeping
-    `CostDisplay.CancelFill` refunds local; host avatar attracts nearby `freeCoins`/`freeEnergyCores`.
-  - **Simultaneous `BuildSlot` upgrade reconciliation (`BuildSync`, `BuildPatch`)**: client intercepts
-    `BuildSlot.OnUpgradeChoiceComplete` before local mutation and sends `MsgRequest` (`Paid` flag);
-    if host already upgraded the slot, host refunds the duplicate coin/core cost and re-sends
-    `MsgBuilt`; client `Apply` cancels/refunds any partial `CostDisplay` fill or open `ChoiceManager`.
-  - **`--mp-panel` & test hooks**: `--mp-panel` opens the F8 Co-op panel and logs clipboard Lobby ID
-    copy/paste round-trip on `--mp-shot`; `TestSimultaneousRace` runs in `--mp-test-night`.
+- Race fixes (`SelfCheck`-covered): autostart/`FollowHost` wait for an idle `SceneTransitionManager`
+  + ready `_UI`/`UIFrameManager`/`PerkManager`, then `CloseAllFrames()`; client dawn coin/core
+  pickups and dusk/dawn perks are host-authoritative (`CurrencyPickupScopePatch`; `CancelFill`
+  refunds stay local); simultaneous `BuildSlot` upgrades: client sends `MsgRequest` before mutating,
+  host refunds a duplicate and re-sends `MsgBuilt`. `--mp-panel` opens F8 panel for `--mp-shot`.
 - Smooth remote motion (`Sync/Interp.cs`, `SelfCheck`-covered): avatar and enemy puppets render
   90 ms in the past between the two bracketing 20 Hz snapshots (Lerp/Slerp, `Plugin.LateUpdate`),
   snap on jumps > 8 units; avatar walk/sprint bools come from its shown speed (>1.5 / >18.5 u/s).
   While connected: vsync off, `targetFrameRate = 60` (re-applied if the game's settings reset it).
   Log-verified: `--mp-test-night` puppets hit/killed, 0 exceptions; smoothness itself not eyeballed.
+- Wave-spawn screen markers no longer follow the remote avatar: `BuildGhost` deletes the cloned
+  `CameraRig` (its `Camera` survived stripping and became `Camera.main`). Log-verified `camera rigs
+  removed=1` both sides, avatar targetable, 0 exceptions; marker steadiness not eyeballed.
 - Overlay crisp on Retina (user-verified). `scripts/setup.sh` runs end to end (outside sandbox).
 
 ## Milestones
@@ -105,6 +98,8 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 9 · MIT licensed
 - **`CastleCenter.CastleCenterPosition` is (0,0,0) until built**; use `FindFirstObjectByType`.
 - **Unequipped weapon models are destroyed in `WeaponEquipper.Start`**; clone the player in
   `PlayerMovement.Awake`, under an inactive parent, stripped first (`Awake` sets singletons).
+- **The player prefab contains the `CameraRig`** (it unparents itself in `Start`). Anything cloned
+  from the player must drop it, or `Camera.main` may resolve to the clone.
 - **Strip order matters:** game-assembly scripts first (`[RequireComponent]` on RVO).
 - **Stripping every non-game MonoBehaviour from an enemy clone breaks its health bar** (UI `Image`
   gone → NRE in `Healthbar.Start`). Strip game scripts + `Pathfinding.*` only.

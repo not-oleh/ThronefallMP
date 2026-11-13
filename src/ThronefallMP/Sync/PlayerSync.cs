@@ -165,6 +165,11 @@ class PlayerSync
             ghostWeapons.Add((w.requiredWeapon != null ? w.requiredWeapon.name : null, w.gameObject, w.visuals,
                 w.visuals != null ? w.visuals.GetComponent<PlayerAttackAnimator>()?.animations : null));
 
+        // The camera rig is a child of the player prefab; its Camera (tagged MainCamera, not a
+        // MonoBehaviour) would survive stripping and become Camera.main for screen markers.
+        var rigs = ghost.GetComponentsInChildren<CameraRig>(true);
+        foreach (var r in rigs) Object.DestroyImmediate(r.gameObject);
+        foreach (var c in ghost.GetComponentsInChildren<Camera>(true)) Object.DestroyImmediate(c);
         // Game scripts first: several [RequireComponent] the pathfinding/controller ones.
         bool Strip(Component c) => c != null && c != ghostHp && c != tag && !(c is OneShotAnimationBase);
         var all = ghost.GetComponentsInChildren<Component>(true);
@@ -181,7 +186,7 @@ class PlayerSync
         SceneManager.MoveGameObjectToScene(ghost, me.gameObject.scene);
         Object.Destroy(holder);
         damageToPeer = 0f;
-        p.Log($"Avatar built for {me.gameObject.scene.name}, weapons=[{string.Join(", ", ghostWeapons.Select(w => w.name))}]");
+        p.Log($"Avatar built for {me.gameObject.scene.name}, weapons=[{string.Join(", ", ghostWeapons.Select(w => w.name))}], camera rigs removed={rigs.Length}");
     }
 
     internal void UpdateGhost(PlayerMovement me)
