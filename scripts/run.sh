@@ -41,12 +41,12 @@ case $MODE in
     host)   launch host --mp-host $(geom tr) "$@" ;;
     client) launch client --mp-join --mp-profile client $(geom bl) "$@" ;;
     both)   launch host --mp-host $(geom tr) "$@"; sleep 2; launch client --mp-join --mp-profile client $(geom bl) "$@" ;;
-    steam-host) launch host --mp-steam-host "$@" ;;
+    steam-host) launch host --mp-steam-host $(geom tr) "$@" ;;
     steam-client)
         case $1 in [0-9]*) LOBBY=$1; shift ;; *)
             LOBBY=$(grep -oE "lobby [0-9]+ open" "$ROOT/game/player-host.log" 2>/dev/null | tail -1 | grep -oE "[0-9]+") ;; esac
         [ -n "$LOBBY" ] || { echo "no lobby id (start steam-host first or pass one)" >&2; exit 1; }
-        launch client --mp-steam-join "$LOBBY" --mp-profile client "$@" ;;
+        launch client --mp-steam-join "$LOBBY" --mp-profile client $(geom bl) "$@" ;;
     *) echo "usage: run.sh [single|host|client|both|steam-host|steam-client [lobby]] [game args]" >&2; exit 1 ;;
 esac
 echo "Launched ($MODE). Logs: game/player-*.log, game/BepInEx/LogOutput.log"

@@ -14,28 +14,30 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 10 · MIT licensed
   90 ms, vsync off + 60 FPS while connected); cloned `CameraRig` removed from the avatar.
   Test flags: `--mp-test-night` (3 nights, then host resigns), `--mp-test-coins`, `--mp-test-rejoin`,
   `--mp-panel`, `run.sh steam-host` / `steam-client [lobby]`.
-- Dual-window layout: `run.sh host|client|both` asks AppKit (JXA) for the usable screen and passes
-  `-screen-width/-height` (pixels) + `--mp-window-pos`; `Plugin.Windowed` enforces them 4 s in
-  (`Screen.SetResolution` + `Screen.MoveMainWindowTo`, frame top-left in pixels). Host top right,
-  client bottom left, largest 16:9 with no overlap (842x474 pt on a 1728x1117 screen; verified
-  with `CGWindowList`: frames touch at y=536, 0 overlap).
-- `--mp-qa` (`Qa.cs`): command file `/tmp/tf_qa_<role>.cmd`: `move dx dz s`, `build slot [choice]`,
-  `night`, `panel on|off`, `hurt fraction`, `shot file.png` (+ a "QA status" log line: coins,
-  income, score, positions, marker positions, built slots). Visual QA pass on Nordfels, both
-  windows screenshotted per step, 0 exceptions:
-  - spawn/HUD identical (8 coins, wave badge); red wave badge stays put on each side while the
-    *other* King moves (marker positions logged: unchanged), so the CameraRig fix holds;
-  - fixed: white "commanding" ring was drawn under the remote avatar (`CommandUnits` indicators
-    are now switched off on the clone);
-  - fixed: F8 panel had no background (unreadable over the game's tooltip): opaque,
-    content-sized box;
-  - buildings: host castle + house, client tower → same slots/levels and same coins on both;
-  - night: same enemies/positions, avatar with spear shown, kills followed;
-  - fixed: client's suppressed dawn pickups were still forwarded as a delta → 7 coins instead
-    of 6; now 6 on both;
-  - fixed: night score differed (client time bonus always max): `MsgTime` now carries the host's
-    night length + spawn period (protocol 10); 499 = 499;
-  - knockout (`hurt 1`): avatar hidden on the host, revived and shown again at dawn.
+- Dual-window layout: `run.sh` asks AppKit for the usable screen; host top right, client bottom
+  left, largest 16:9 with no overlap (`--mp-window-pos`, enforced 4 s in by `Plugin.Windowed`).
+- `--mp-qa` (`Qa.cs`): command file `/tmp/tf_qa_<role>.cmd`: `move dx dz s`, `build slot [choice|ui]`,
+  `choice n|ok` (the game's own choice cards), `hit fraction` (nearest enemy; client: via the host),
+  `night`, `panel on|off`, `disconnect`, `hurt fraction`, `shot file.png` (+ a "QA status" log line:
+  coins, income, score, enemy health bars shown, building hp by index, built slots).
+- Visual QA pass 1 (Nordfels): HUD, markers, buildings, night 1, knockout/revive, score equal.
+- Visual QA pass 2 (Steam for the panel, UDP for the match; paired screenshots, 3 nights):
+  - F8 panel over Steam: host "Invite friend / Copy lobby ID / Disconnect", client "Copy lobby ID /
+    Disconnect", offline "Host Steam lobby / Join lobby ID from clipboard": no clipping or overlap.
+    Fixed: the offline hint line was cut at the panel edge (now two lines). `run.sh steam-*` now
+    use the corner layout too.
+  - fixed: **client enemy health bars were drawn edge-on** (rotated with the body): the puppet
+    strip removed `BillboardAlign`; it is kept now, and `Healthbar` is re-enabled on the clone.
+    Bars now match the host (same enemies, castle bar too; "bars=" equal in every paired status).
+  - fixed: **client lost at dusk when night came soon after building**: the host cached its
+    building list before the game deleted 9 slots, so building-hp indices were shifted and the
+    client applied hp 0 to its castle. The cache is rebuilt when a cached slot is destroyed.
+  - fixed: **Builder's Guild upgraded two houses** (client ran the perk too and asked the host):
+    a client now drops upgrades the game starts without a player (also the Outpost perk).
+    Verified: one house on choice, one more at the next dusk, same on both.
+  - castle lv2 through the real choice cards (Builder's Guild, 2 open + 2 locked cards): same
+    castle/house models, coins 8, hp 75, wave badges on both. Nights 2 and 3: coins and score
+    equal at every step (15 / 1089, 17 / 1611).
 - Overlay crisp on Retina (user-verified). `scripts/setup.sh` runs end to end (outside sandbox).
 
 ## Milestones
@@ -47,9 +49,13 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 10 · MIT licensed
 
 ## Not verified
 
-- QA pass gaps: upgrade *choice* via `build castle 1` (6 coins, costs 7); enemy hp bar on the
-  client not seen in the one frame where the host showed it; Steam-only panel buttons (copy/
-  invite) not shown under UDP; realm-protection score if a building falls.
+- QA pass gaps: clicking the panel buttons (only rendering checked); the other King's own hp bar
+  is not shown on the avatar; realm-protection score if a building falls; client `choice` UI
+  (only the host picked a card).
+- Host-ownership grace (`Plugin.PeerRecent`, 15 s; `FrozenByHost` uses it): a client stall past the
+  3 s peer timeout once let its own `Spawn.Update` run (NRE at a dawn). Tested by freezing the
+  client 5 s mid-night (`kill -STOP`/`-CONT`): "Host silent" logged, reconnect, 0 exceptions. The
+  original NRE was not reproduced before the fix; a host gone > 15 s still hands the world back.
 - Interpolation looks smooth (needs a human; screenshots are single frames). Snapshots are stamped
   with receive time, so Steam jitter > ~40 ms would show; fix = sender timestamps in State packets.
 - **Steam between two accounts / two machines** (only same-account loopback tested). Steam
@@ -67,7 +73,7 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 10 · MIT licensed
 
 ## Next tasks
 
-- [ ] `--mp-qa` pass with more coins: castle lv2 choice, later waves, enemy hp bars on the client.
+- [ ] `--mp-qa` pass beyond wave 3: ranged/flying enemies, towers, a building falling.
 - [ ] Kill only the client mid-night, relaunch a fresh client process; check snapshot catch-up.
 - [ ] `--mp-test-night` with Falchion and Trap; check "(indirect)" hits from the trap.
 - [ ] Two friends on two Macs: Co-op panel → Host → Invite friend; Eternal Trials co-op; later waves.
@@ -76,7 +82,9 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 10 · MIT licensed
 
 - **Harmony postfixes run even when a prefix skipped the original**; take `bool __runOriginal`.
 - **A `Texture2D` referenced only by a `GUIStyle` is unloaded on scene change** (HideAndDontSave).
-- **Stale logs fool wait loops**: delete `game/player-*.log` before a scripted launch.
+- **Stale logs fool wait loops**: delete `game/player-host.log` / `player-client.log` before a
+  scripted launch. `grep` over both logs prints them in no fixed order; read each separately.
+- **QA nights: stay at the castle** (else enemies slip past: defeat). Castle lv2 (7 coins) needs night 2.
 - **The player is invulnerable by day and a client ignores local damage**; QA `hurt` works at
   night through `applyingHostDamage`.
 - **Dual-window testing on one Mac sends keyboard input to both windows** (`isFocused` and
@@ -105,13 +113,8 @@ Last updated: 2026-11-13 · plugin version 0.9.0 · protocol 10 · MIT licensed
   gone → NRE in `Healthbar.Start`). Strip game scripts + `Pathfinding.*` only.
 - **`Hp.invulnerable` is reset every dusk** for everything `PlayerOwned`.
 - **Saved video settings are re-applied at startup**: `Screen.SetResolution` is delayed 4 s.
-- **"Peer connected" is often logged twice**: scene loads stall past the 3 s timeout. Harmless.
-- **`.Reverse()` on an array resolves to the span overload**; use `Enumerable.Reverse(...)`.
 - **Fresh save has nothing equipped**; use `--mp-equip`. `--mp-autostart` skips the tutorial.
 - **Same Steam account on one Mac shares one SteamID**: both instances read the same P2P
   channel. `SteamTransport` uses channel 0 for host-bound, 1 for client-bound packets.
-- **Steam tests: `run.sh steam-host`, wait (bounded) for "lobby <id> open", then `steam-client`.**
-- **Potion Vials is not an AoE-without-attacker weapon**; use Blowpipe/Blood Wand to test indirect hits.
 - **Test waits must be bounded** (`for i in $(seq 1 60); do grep -q … && break; sleep 3; done`).
   Once (not reproduced) the host never left the title screen; an unbounded `until grep` hung.
-- **`echo =====` fails in zsh** (`=word` expansion); use `echo -----` in test one-liners.

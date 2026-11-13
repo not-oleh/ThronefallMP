@@ -20,7 +20,7 @@ class BuildSync
     internal static readonly AccessTools.FieldRef<BuildSlot, int> LevelField = AccessTools.FieldRefAccess<BuildSlot, int>("level");
     internal static readonly AccessTools.FieldRef<BuildSlot, BuildSlot.Upgrade> SelectedField =
         AccessTools.FieldRefAccess<BuildSlot, BuildSlot.Upgrade>("upgradeSelected");
-    static readonly AccessTools.FieldRef<BuildSlot, PlayerInteraction> PlayerField =
+    internal static readonly AccessTools.FieldRef<BuildSlot, PlayerInteraction> PlayerField =
         AccessTools.FieldRefAccess<BuildSlot, PlayerInteraction>("playerInteractionSelected");
     static readonly System.Reflection.MethodInfo OnTargetUpgradeMethod =
         AccessTools.Method(typeof(BuildingInteractor), "OnTargetUpgrade");
@@ -93,6 +93,9 @@ class BuildSync
     internal bool InterceptClientChoice(BuildSlot slot, Choice choice)
     {
         if (p.role != "client" || applying || choice == null || !p.Match.FrozenByHost(slot.gameObject.scene.name)) return false;
+        // No player = the game upgrading on its own (Builder's Guild, Outpost perk). The host's
+        // copy of that perk does it and tells us; asking as well would upgrade a second building.
+        if (PlayerField(slot) == null) { p.Log($"Build: {slot.buildingName} auto-upgrade left to the host"); return true; }
         int nextLevel = LevelField(slot) + 1;
         var upg = SelectedField(slot) ?? (nextLevel <= slot.upgrades.Count ? slot.upgrades[nextLevel - 1] : null);
         if (upg == null) return false;

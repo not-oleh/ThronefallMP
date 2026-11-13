@@ -41,6 +41,7 @@ public class Plugin : BaseUnityPlugin
     const int DefaultPort = 27015;
     const float SendInterval = 1f / 20f;
     const float PeerTimeout = 3f;
+    const float HostGrace = 15f; // a stalled frame or a hiccup must not hand the world back to the client
 
     internal static Plugin Instance;
     internal static string Profile;
@@ -70,6 +71,9 @@ public class Plugin : BaseUnityPlugin
     internal string followPaused;
 
     internal bool PeerAlive => Time.unscaledTime - lastHeard < PeerTimeout;
+    /// Heard from the peer lately: the client keeps treating the match as host-owned (MatchSync.FrozenByHost).
+    internal bool PeerRecent => Time.unscaledTime - lastHeard < HostGrace;
+    bool graceLogged;
 
     static bool SceneReady =>
         SceneTransitionManager.instance is { SceneTransitionIsRunning: false } stm
@@ -196,6 +200,12 @@ public class Plugin : BaseUnityPlugin
         lastMe = me;
 
         bool wasAlive = PeerAlive;
+        if (wasAlive) graceLogged = false;
+        else if (role == "client" && PeerRecent && !graceLogged)
+        {
+            graceLogged = true;
+            Logger.LogInfo($"Host silent for {Time.unscaledTime - lastHeard:0.0} s: match stays host-owned for up to {HostGrace:0} s");
+        }
         if (link.Pump(OnState, OnMessage))
         {
             lastHeard = Time.unscaledTime;
@@ -495,7 +505,8 @@ public class Plugin : BaseUnityPlugin
                 if (ulong.TryParse(GUIUtility.systemCopyBuffer?.Trim(), out var id) && id != 0) StartLink("client", new SteamTransport(false, id, Log));
                 else lobbyText = "Clipboard has no lobby ID";
             }
-            GUILayout.Label("Or accept a Steam invite (friend list → Join game).", overlayStyle);
+            GUILayout.Label("Or accept a Steam invite", overlayStyle); // one line was clipped by the panel width
+            GUILayout.Label("(friend list → Join game).", overlayStyle);
         }
         else
         {

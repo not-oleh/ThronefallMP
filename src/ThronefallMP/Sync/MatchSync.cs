@@ -66,7 +66,8 @@ class MatchSync
     internal void ResendAll() { sentTimeScene = sentBalanceScene = sentEndScene = null; }
 
     /// Client only: while the host is in our scene, our own day/night cycle must not advance.
-    internal bool FrozenByHost(string scene) => p.role == "client" && p.PeerAlive && p.Players.Remote.Scene == scene;
+    /// PeerRecent, not PeerAlive: a 3 s stall once let the client's own spawner run for a frame.
+    internal bool FrozenByHost(string scene) => p.role == "client" && p.PeerRecent && p.Players.Remote.Scene == scene;
 
     /// Client only: dawn building harvests, world coin/core pickups and dusk/dawn perks run on
     /// both instances; only the host credits them to the shared treasury (and pushes MsgBalance),

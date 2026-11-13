@@ -48,7 +48,7 @@ class EnemySync
     int built, killed, hitsSent, hitsApplied, scopedHitsSent;
 
     // Both: building hp, indexed by sorted slot id (identical on both instances).
-    List<Hp> buildings;
+    List<Hp> buildings;    List<BuildSlot> buildingSlots;
     PlayerInteraction buildingsFor;
     readonly Dictionary<ushort, float> hostBuildingHp = new();
     bool buildingsFresh;
@@ -224,14 +224,15 @@ class EnemySync
     List<Hp> Buildings(string scene)
     {
         var pi = PlayerInteraction.instance;
-        if (buildings == null || buildingsFor != pi)
+        // The game deletes some slots shortly after the scene loads; a list cached before that has
+        // other indices than the peer's, so rebuild as soon as a cached slot is gone.
+        if (buildings == null || buildingsFor != pi || buildingSlots.Any(s => s == null))
         {
             buildingsFor = pi;
-            buildings = Object.FindObjectsByType<BuildSlot>(FindObjectsInactive.Include, FindObjectsSortMode.None)
+            buildingSlots = Object.FindObjectsByType<BuildSlot>(FindObjectsInactive.Include, FindObjectsSortMode.None)
                 .Where(s => s.gameObject.scene.name == scene)
-                .OrderBy(BuildSync.SlotId, System.StringComparer.Ordinal)
-                .Select(s => s.BuildingParent != null ? s.BuildingParent.GetComponent<Hp>() : null)
-                .ToList();
+                .OrderBy(BuildSync.SlotId, System.StringComparer.Ordinal).ToList();
+            buildings = buildingSlots.Select(s => s.BuildingParent != null ? s.BuildingParent.GetComponent<Hp>() : null).ToList();
         }
         return buildings;
     }
@@ -272,7 +273,12 @@ class EnemySync
         if (++hitsSent <= 5 || hitsSent % 20 == 0) p.Log($"Enemies: sent hit #{hitsSent} on {id} for {amount:0.#}{(scoped ? " (indirect)" : "")}");
     }
 
-    /// Test only: the puppet closest to `pos`.
+    /// Test only: the enemy (host) or puppet (client) closest to `pos`.
+    internal Hp NearestEnemy(Vector3 pos) => p.role == "host"
+        ? tracked.Values.Where(x => x.hp != null && x.hp.HpValue > 0f)
+            .OrderBy(x => (x.hp.transform.position - pos).sqrMagnitude).Select(x => x.hp).FirstOrDefault()
+        : NearestPuppet(pos);
+
     internal Hp NearestPuppet(Vector3 pos) => puppets.Values.Where(x => x.Go != null && x.Hp != null && x.Hp.HpValue > 0f)
         .OrderBy(x => (x.Go.transform.position - pos).sqrMagnitude).Select(x => x.Hp).FirstOrDefault();
 
@@ -331,7 +337,7 @@ class EnemySync
         var hp = go.GetComponentInChildren<Hp>();
         var tag = go.GetComponent<TaggedObject>();
         // Keep visuals, health (+ its bar), tags, and the bounce that reads transform motion.
-        bool Keep(Component c) => c is Hp || c is TaggedObject || c is SimpleWalk || c is Healthbar || c is HealthbarMulti;
+        bool Keep(Component c) => c is Hp || c is TaggedObject || c is SimpleWalk || c is Healthbar || c is BillboardAlign; // BillboardAlign turns the bar to the camera
         var all = go.GetComponentsInChildren<Component>(true);
         foreach (var c in all)
             if (c != null && c is MonoBehaviour && !Keep(c) && c.GetType().Assembly == typeof(Hp).Assembly) Object.DestroyImmediate(c);
@@ -339,6 +345,9 @@ class EnemySync
         foreach (var c in all)
             if (c != null && c is MonoBehaviour && (c.GetType().Namespace ?? "").StartsWith("Pathfinding")) Object.DestroyImmediate(c);
         foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true)) rb.isKinematic = true;
+        // A clone of a live scene enemy inherits its bar switched off (Healthbar disables itself at
+        // full hp), so Start would never run and the bar would never listen for hp changes.
+        foreach (var hb in go.GetComponentsInChildren<Healthbar>(true)) hb.enabled = true;
 
         if (hp != null)
         {
@@ -404,7 +413,7 @@ class EnemySync
             float target = hostBuildingHp.TryGetValue((ushort)i, out var v) ? v : h.maxHp;
             if (target <= 0f)
             {
-                if (!h.KnockedOut) { h.TakeDamage(h.HpValue + 1f); p.Log($"Enemies: building {h.name} destroyed on host"); }
+                if (!h.KnockedOut) { h.TakeDamage(h.HpValue + 1f); p.Log($"Enemies: building {i} {h.transform.parent?.name} destroyed on host"); }
             }
             else if (h.KnockedOut) { h.Revive(false, Mathf.Clamp01(target / h.maxHp)); p.Log($"Enemies: building {h.name} revived on host"); }
             else if (Mathf.Abs(h.HpValue - target) > 0.01f) h.SetHpTo(Mathf.Min(target, h.maxHp));
@@ -444,6 +453,11 @@ class EnemySync
     }
 
     /// Test status line.
+    /// Test only: hp of every building slot whose Hp is not simply "full and active".
+    internal string BuildingStatus(string scene) => string.Join(" ", Buildings(scene).Select((h, i) => (h, i))
+        .Where(x => x.h != null && (x.h.gameObject.activeInHierarchy || x.h.HpValue > 0f))
+        .Select(x => $"{x.i}:{x.h.HpValue:0.#}/{x.h.maxHp:0.#}{(x.h.gameObject.activeInHierarchy ? "" : "(off)")}"));
+
     internal string Status() => p.role == "host"
         ? $"tracked={tracked.Count} nextId={nextId} hitsApplied={hitsApplied}"
         : $"known={known.Count} puppets={puppets.Values.Count(x => x.Go != null)} missing={puppets.Values.Count(x => x.Go == null)} hitsSent={hitsSent} indirect={scopedHitsSent}";

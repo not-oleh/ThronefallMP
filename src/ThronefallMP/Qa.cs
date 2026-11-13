@@ -11,9 +11,13 @@ namespace ThronefallMP;
 /// screenshotted from outside. The file (/tmp/tf_qa_host.cmd or /tmp/tf_qa_client.cmd) is read
 /// and deleted; one command per line:
 ///   move dx dz seconds     walk with stick input (dx right, dz up on screen) for that long
-///   build slot [choice]    slot = "castle" or part of a building name; choice = branch index
+///   build slot [choice]    slot = "castle" or part of a building name; choice = branch index,
+///                          or "ui" to pay and open the game's own choice cards
+///   choice n | ok          select card n in the open choice frame / confirm the selection
+///   hit fraction           nearest enemy loses that share of its max hp (client: sent to the host)
 ///   night                  host: start the night
 ///   panel on|off           F8 Co-op panel
+///   disconnect             close the connection (the panel then shows its offline buttons)
 ///   hurt fraction          local player takes that share of its max hp (1 = knockout)
 ///   shot path.png          screenshot incl. overlay, plus a "QA status" log line
 static class Qa
@@ -54,14 +58,36 @@ static class Qa
                 p.Log($"QA: move {a[1]} {a[2]} for {a[3]} s from {me.transform.position}");
                 break;
             case "build":
-                Build(p, pi, a[1], a.Length > 2 ? int.Parse(a[2]) : 0);
+                Build(p, pi, a[1], a.Length > 2 && a[2] != "ui" ? int.Parse(a[2]) : 0, a.Length > 2 && a[2] == "ui");
                 break;
+            case "choice":
+            {
+                var helper = UnityEngine.Object.FindFirstObjectByType<ChoiceUIFrameHelper>();
+                if (a[1] == "ok") { p.Log($"QA: choice ok (card {ChoiceUIFrameHelper.CurrentSelectionIndex})"); helper.frame.Apply(); break; }
+                var cards = Traverse.Create(helper).Field<System.Collections.Generic.List<TFUIUpgradeChoice>>("choices").Value;
+                p.Log($"QA: choice {a[1]} of {cards.Count}");
+                helper.frame.Select(cards[int.Parse(a[1])]);
+                break;
+            }
+            case "hit":
+            {
+                var enemy = p.Enemies.NearestEnemy(me.transform.position);
+                if (enemy == null) { p.Log("QA: hit: no enemy"); break; }
+                float amount = enemy.maxHp * F(a[1]);
+                if (p.role == "client") p.Enemies.SendHit(enemy, amount, false);
+                else enemy.TakeDamage(amount, me.Hp.TaggedObj, causedByPlayer: true);
+                p.Log($"QA: hit {enemy.name} for {amount:0.#}, hp {enemy.HpValue:0.#}/{enemy.maxHp:0.#}");
+                break;
+            }
             case "night":
                 p.Log($"QA: night (free to call: {pi.IsFreeToCallNight})");
                 DayNightCycle.Instance.SwitchToNight();
                 break;
             case "panel":
                 p.panelOpen = a[1] == "on";
+                break;
+            case "disconnect": // put `shot` on the next line of the same file: no link, no more polling
+                p.Disconnect();
                 break;
             case "hurt":
                 // Same door the host's forwarded damage uses (DamagePatch blocks local hits on a client).
@@ -79,7 +105,7 @@ static class Qa
         }
     }
 
-    static void Build(Plugin p, PlayerInteraction pi, string name, int choice)
+    static void Build(Plugin p, PlayerInteraction pi, string name, int choice, bool ui)
     {
         var open = UnityEngine.Object.FindObjectsByType<BuildSlot>(FindObjectsSortMode.None)
             .Where(s => s.CanBeUpgraded && !s.ActivatorUpgradesThis)
@@ -97,8 +123,10 @@ static class Qa
         var branch = upg.upgradeBranches[Mathf.Clamp(choice, 0, upg.upgradeBranches.Count - 1)];
         p.Log($"QA: build {slot.buildingName} lv{slot.Level}->{slot.Level + 1} choice {choice}/{upg.upgradeBranches.Count} cost {upg.cost}");
         if (upg.cost > 0) pi.SpendCoins(upg.cost);
+        if (ui) { slot.TryToBuildOrUpgradeAndPay(pi); return; } // the game's choice cards; then `choice n`, `choice ok`
         // Same path as the game's choice UI: the selected upgrade, then the chosen branch.
         BuildSync.SelectedField(slot) = upg;
+        BuildSync.PlayerField(slot) = pi;
         slot.OnUpgradeChoiceComplete(branch.choiceDetails);
     }
 
@@ -113,6 +141,8 @@ static class Qa
         int income = UnityEngine.Object.FindObjectsByType<BuildSlot>(FindObjectsSortMode.None).Where(s => s.State == BuildSlot.BuildingState.Built).Sum(s => s.GoldIncome);
         return $"{DayNightCycle.Instance?.CurrentTimestate} coins={PlayerInteraction.instance.Balance} income={income} score={ScoreManager.Instance?.CurrentScore} hp={me.Hp.HpValue:0.#}"
             + $" me={me.transform.position} avatar={(p.Players.ghost != null && p.Players.ghost.activeSelf ? p.Players.ghost.transform.position.ToString() : "hidden")}"
+            + $" bars={UnityEngine.Object.FindObjectsByType<Healthbar>(FindObjectsSortMode.None).Count(h => h.isenemy && h.enabled)}"
+            + $" bld=[{p.Enemies.BuildingStatus(me.gameObject.scene.name)}]"
             + $" {p.Enemies.Status()} markers=[{string.Join(" ", markers)}] built=[{string.Join(" ", built)}]";
     }
 }
